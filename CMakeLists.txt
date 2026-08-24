@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 4.1.2)
+project(safebox LANGUAGES CXX)
+add_executable(safebox src/main.cpp)
+target_compile_features(safebox PRIVATE cxx_std_23)
+set_target_properties(safebox PROPERTIES CXX_EXTENSIONS OFF)
