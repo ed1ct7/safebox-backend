@@ -1,5 +1,12 @@
-cmake_minimum_required(VERSION 4.1.2)
+cmake_minimum_required(VERSION 3.24)
 project(safebox LANGUAGES CXX)
-add_executable(safebox src/main.cpp)
-target_compile_features(safebox PRIVATE cxx_std_23)
-set_target_properties(safebox PROPERTIES CXX_EXTENSIONS OFF)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_EXTENSIONS OFF)
+
+include(cmake/CompilerWarnings.cmake)
+
+add_subdirectory(src/daemon)
+add_subdirectory(src/application)
+add_subdirectory(src/infrastructure)
+add_subdirectory(src/domain)
