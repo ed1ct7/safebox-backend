@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "safebox",
+  "version": "0.1.0",
+  "dependencies": [
+    "libsodium",
+    "libsqlite3",
+    "nlohmann-json",
+    "fmt",
+    "cpp-httplib",
+    "stb",
+    "miniz"
+  ],
+  "features": {
+    "tests": {
+      "description": "Catch2 unit/integration tests; включается вместе с -DSAFEBOX_BUILD_TESTS=ON",
+      "dependencies": [
+        "catch2"
+      ]
+    }
+  }
+}
