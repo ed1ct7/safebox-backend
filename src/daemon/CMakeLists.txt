@@ -6,14 +6,17 @@ add_executable(safeboxd
     web_assets.cpp
 )
 
-# http (наружное) + infra (внутреннее). Порядок не важен, важно что других
-# зависимостей нет: daemon ничего не знает о domain/application напрямую -
-# они приезжают транзитивно через safebox-core внутри safebox-http.
+# http (наружное) + infra (внутреннее). других зависимостей нет: domain и
+# application приезжают транзитивно через safebox-core внутри safebox-http.
 target_link_libraries(safeboxd PRIVATE safebox-http safebox-infra)
 
+target_compile_definitions(safeboxd PRIVATE SAFEBOX_VERSION="${PROJECT_VERSION}")
+
 sbx_apply_warnings(safeboxd)
+sbx_apply_sanitizers(safeboxd)
+sbx_package_static(safeboxd)
 
 if(SAFEBOX_WEB_DIST)
-    include(${CMAKE_SOURCE_DIR}/cmake/EmbedWeb.cmake)
+    include(${PROJECT_SOURCE_DIR}/cmake/EmbedWeb.cmake)
     sbx_embed_web(safeboxd "${SAFEBOX_WEB_DIST}")
 endif()

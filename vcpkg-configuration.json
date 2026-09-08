@@ -1,5 +1,14 @@
 {
   "$comment": [
-    "baseline добавлю, когда будет клон vcpkg на сборочной машине"
-  ]
+    "Конфигурация vcpkg (manifest mode). baseline фиксирует версии всех портов:",
+    "сборка воспроизводима на любой машине. Реестр git (а не builtin) работает",
+    "одинаково и с клоном microsoft/vcpkg, и с vcpkg, встроенным в Visual Studio.",
+    "Обновление зависимостей = смена baseline (git ls-remote https://github.com/microsoft/vcpkg HEAD)."
+  ],
+  "default-registry": {
+    "kind": "git",
+    "repository": "https://github.com/microsoft/vcpkg",
+    "baseline": "07f4812200df3d3c931c0c8a6081d3b21fe2bf9f"
+  },
+  "registries": []
 }

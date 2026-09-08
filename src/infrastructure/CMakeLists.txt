@@ -1,6 +1,12 @@
 # safebox-infra: все сторонние либы (sodium, sqlite3, stb, miniz, fmt) подключены PRIVATE,
 # наружу торчит только factories.hpp
 
+find_package(unofficial-sodium CONFIG REQUIRED)
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
+find_package(miniz CONFIG REQUIRED)
+find_package(fmt CONFIG REQUIRED)
+find_package(Stb REQUIRED)
+
 add_library(safebox-infra STATIC
     src/sodium_crypto.cpp
     src/sqlite_database.cpp
@@ -16,12 +22,18 @@ target_include_directories(safebox-infra
     PUBLIC  "${CMAKE_CURRENT_SOURCE_DIR}/include"  # только factories.hpp
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src"      # sqlite_database.hpp и пр.
 )
+# stb - header-only без imported-таргета; SYSTEM: предупреждения чужого кода не наши.
+target_include_directories(safebox-infra SYSTEM PRIVATE "${Stb_INCLUDE_DIR}")
 
-# PUBLIC domain: factories.hpp возвращает доменные типы (KeyHandle, VaultStore).
+# PUBLIC domain: factories.hpp возвращает доменные порты.
 # PRIVATE сторонние: их заголовки видны только .cpp этого слоя.
 target_link_libraries(safebox-infra
-    PUBLIC safebox-domain
-    PRIVATE libsodium sqlite3 stb miniz fmt
+    PUBLIC  safebox-domain
+    PRIVATE unofficial-sodium::sodium
+            unofficial::sqlite3::sqlite3
+            miniz::miniz
+            fmt::fmt
 )
 
 sbx_apply_warnings(safebox-infra)
+sbx_apply_sanitizers(safebox-infra)
