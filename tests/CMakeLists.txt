@@ -17,3 +17,12 @@ function(sbx_add_test_executable name)
     sbx_apply_sanitizers(${name})
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
+
+# infra: адаптеры против реальных sqlite/libsodium/stb/miniz
+sbx_add_test_executable(safebox-infra-tests
+    infra/crypto_test.cpp
+)
+target_link_libraries(safebox-infra-tests PRIVATE
+    safebox-infra
+    Catch2::Catch2WithMain
+)
