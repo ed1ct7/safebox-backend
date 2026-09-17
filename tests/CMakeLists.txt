@@ -20,6 +20,7 @@ endfunction()
 
 # infra: адаптеры против реальных sqlite/libsodium/stb/miniz
 sbx_add_test_executable(safebox-infra-tests
+    infra/sqlite_store_test.cpp
     infra/crypto_test.cpp
 )
 target_link_libraries(safebox-infra-tests PRIVATE
