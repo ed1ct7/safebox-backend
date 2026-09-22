@@ -18,6 +18,23 @@ function(sbx_add_test_executable name)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
+# application: интеракторы
+sbx_add_test_executable(safebox-app-tests
+    application/safe_service_test.cpp
+    application/idle_policy_test.cpp
+    application/import_export_test.cpp
+    application/entries_search_test.cpp
+)
+target_include_directories(safebox-app-tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/src/application/src" # white-box: IdlePolicy
+)
+target_link_libraries(safebox-app-tests PRIVATE
+    safebox-core      # тестируемые сервисы
+    safebox-infra     # настоящий SodiumCrypto (см. шапку файла)
+    safebox-test-fakes
+    Catch2::Catch2WithMain
+)
+
 # infra: адаптеры против реальных sqlite/libsodium/stb/miniz
 sbx_add_test_executable(safebox-infra-tests
     infra/sqlite_store_test.cpp

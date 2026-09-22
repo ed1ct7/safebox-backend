@@ -9,6 +9,7 @@ add_library(safebox-application STATIC
     src/import_export.cpp
     src/search_service.cpp
     src/sealing.cpp
+    src/factory.cpp
 )
 
 target_include_directories(safebox-application
@@ -21,3 +22,4 @@ target_include_directories(safebox-application
 target_link_libraries(safebox-application PUBLIC safebox-domain)
 
 sbx_apply_warnings(safebox-application)
+sbx_apply_sanitizers(safebox-application)
