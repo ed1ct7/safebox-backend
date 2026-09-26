@@ -5,6 +5,8 @@
 #   integration - весь стек на случайном порту
 
 find_package(Catch2 3 CONFIG REQUIRED)
+find_package(httplib CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 
 add_library(safebox-test-fakes INTERFACE)
 target_include_directories(safebox-test-fakes INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/fakes")
@@ -32,6 +34,21 @@ target_link_libraries(safebox-app-tests PRIVATE
     safebox-core      # тестируемые сервисы
     safebox-infra     # настоящий SodiumCrypto (см. шапку файла)
     safebox-test-fakes
+    Catch2::Catch2WithMain
+)
+
+# http: транспорт на фейковых сервисах, без сети
+sbx_add_test_executable(safebox-http-tests
+    http/api_test.cpp
+)
+target_include_directories(safebox-http-tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/src/http/src" # white-box: registerRoutes, ApiContext
+)
+target_link_libraries(safebox-http-tests PRIVATE
+    safebox-http
+    safebox-test-fakes
+    httplib::httplib
+    nlohmann_json::nlohmann_json
     Catch2::Catch2WithMain
 )
 
