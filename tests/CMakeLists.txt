@@ -66,3 +66,16 @@ target_link_libraries(safebox-infra-tests PRIVATE
     miniz::miniz # сторонний zip-ридер для проверки StreamZipWriter
     Catch2::Catch2WithMain
 )
+
+# integration: весь стек на ephemeral-порту
+sbx_add_test_executable(safebox-integration-tests
+    integration/api_test.cpp
+)
+target_link_libraries(safebox-integration-tests PRIVATE
+    safebox-http
+    safebox-infra
+    httplib::httplib
+    nlohmann_json::nlohmann_json
+    miniz::miniz
+    Catch2::Catch2WithMain
+)
