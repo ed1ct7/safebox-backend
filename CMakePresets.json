@@ -1,0 +1,96 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "description": "база: Ninja, build/<preset>, vcpkg toolchain",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "SAFEBOX_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "windows-msvc",
+      "hidden": true,
+      "inherits": "base",
+      "description": "MSVC из dev-окружения VS, build.ps1 поднимает его сам",
+      "architecture": { "value": "x64", "strategy": "external" },
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "cl" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "msvc-debug",
+      "inherits": "windows-msvc",
+      "displayName": "MSVC Debug (x64-windows, с тестами)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "VCPKG_TARGET_TRIPLET": "x64-windows"
+      }
+    },
+    {
+      "name": "msvc-release",
+      "inherits": "windows-msvc",
+      "displayName": "MSVC Release (static, один exe)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static",
+        "SAFEBOX_BUILD_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "msvc-asan",
+      "inherits": "windows-msvc",
+      "displayName": "MSVC + ASan (RelWithDebInfo)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "SAFEBOX_SANITIZERS": "address"
+      }
+    },
+    {
+      "name": "clang-ubsan",
+      "inherits": "base",
+      "displayName": "clang + UBSan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "SAFEBOX_SANITIZERS": "undefined"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+    },
+    {
+      "name": "linux-gcc",
+      "inherits": "base",
+      "displayName": "Linux GCC Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "g++"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "msvc-debug", "configurePreset": "msvc-debug" },
+    { "name": "msvc-release", "configurePreset": "msvc-release" },
+    { "name": "msvc-asan", "configurePreset": "msvc-asan" },
+    { "name": "clang-ubsan", "configurePreset": "clang-ubsan" },
+    { "name": "linux-gcc", "configurePreset": "linux-gcc" }
+  ],
+  "testPresets": [
+    {
+      "name": "test-base",
+      "hidden": true,
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "timeout": 600 }
+    },
+    { "name": "msvc-debug", "inherits": "test-base", "configurePreset": "msvc-debug" },
+    { "name": "msvc-asan", "inherits": "test-base", "configurePreset": "msvc-asan" },
+    { "name": "clang-ubsan", "inherits": "test-base", "configurePreset": "clang-ubsan" },
+    { "name": "linux-gcc", "inherits": "test-base", "configurePreset": "linux-gcc" }
+  ]
+}
