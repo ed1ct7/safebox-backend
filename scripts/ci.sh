@@ -8,29 +8,44 @@ cd "$(dirname "$0")/.."
 fail() { echo "CI FAIL: $1" >&2; exit 1; }
 
 echo "==> header hygiene"
-SRC_FILES=$(grep -rl --include='*.cpp' --include='*.hpp' . src 2>/dev/null || true)
 
-# a) сторонние заголовки - только внутри адаптеров
-viol=$(grep -rl --include='*.cpp' --include='*.hpp' \
-       -E '#include *[<"](sqlite3\.h|sodium\.h|stb_[a-z_]+\.h)' src \
+# a) сторонние заголовки адаптеров - только внутри infra
+viol=$(grep -rlE --include='*.cpp' --include='*.hpp' \
+       '#include *[<"](sqlite3\.h|sodium\.h|stb_[a-z_0-9]+\.h|miniz\.h)' src \
        | grep -v '^src/infrastructure/src/' || true)
-[ -z "$viol" ] || fail "sqlite3/sodium/stb вне src/infrastructure/src: $viol"
+[ -z "$viol" ] || fail "sqlite3/sodium/stb/miniz вне src/infrastructure/src: $viol"
 
 # b) витрина infra (factories.hpp) - только infra и daemon (корень композиции)
 viol=$(grep -rl --include='*.cpp' --include='*.hpp' 'safebox/infra/' src \
        | grep -vE '^src/(infrastructure|daemon)/' || true)
 [ -z "$viol" ] || fail "safebox/infra/* вне infrastructure/daemon: $viol"
 
-# c) единственная точка входа
-viol=$(grep -rl --include='*.cpp' -E 'int main\s*\(' src \
+# c) транспортные библиотеки - только http-слой
+viol=$(grep -rlE --include='*.cpp' --include='*.hpp' '#include *[<"](httplib\.h|nlohmann/)' src \
+       | grep -v '^src/http/' || true)
+[ -z "$viol" ] || fail "httplib/nlohmann вне src/http: $viol"
+
+# d) единственная точка входа
+viol=$(grep -rlE --include='*.cpp' 'int main\s*\(' src \
        | grep -v '^src/daemon/main\.cpp$' || true)
 [ -z "$viol" ] || fail "main() вне src/daemon/main.cpp: $viol"
 
+# e) домен и application не знают ни ОС-API, ни транспорта
+viol=$(grep -rlE --include='*.cpp' --include='*.hpp' '#include *[<"](windows\.h|unistd\.h)' \
+       src/domain src/application || true)
+[ -z "$viol" ] || fail "ОС-заголовки в domain/application: $viol"
+
 echo "    границы слоёв чисты"
 
-# сборка/тесты: пока выключено
-# cmake --preset asan-ubsan
-# cmake --build --preset asan-ubsan
-# ctest --preset asan-ubsan
+if [ "${1:-}" = "--hygiene" ]; then
+    echo "==> CI OK (только гигиена)"
+    exit 0
+fi
+
+PRESET="${PRESET:-clang-ubsan}"
+echo "==> configure/build/test: $PRESET"
+cmake --preset "$PRESET"
+cmake --build --preset "$PRESET"
+ctest --preset "$PRESET"
 
 echo "==> CI OK"
