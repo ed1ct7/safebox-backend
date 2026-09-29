@@ -9,6 +9,7 @@ find_package(httplib CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(miniz CONFIG REQUIRED)
 find_package(Stb REQUIRED)
+find_package(WebP CONFIG REQUIRED)
 
 add_library(safebox-test-fakes INTERFACE)
 target_include_directories(safebox-test-fakes INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/fakes")
@@ -64,6 +65,7 @@ target_include_directories(safebox-infra-tests SYSTEM PRIVATE "${Stb_INCLUDE_DIR
 target_link_libraries(safebox-infra-tests PRIVATE
     safebox-infra
     miniz::miniz # сторонний zip-ридер для проверки StreamZipWriter
+    WebP::webp   # сторонний webp-энкодер для проверки миниатюр
     Catch2::Catch2WithMain
 )
 

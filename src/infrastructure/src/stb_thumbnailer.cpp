@@ -1,4 +1,5 @@
-// Миниатюры через stb: decode -> resize -> поворот по EXIF -> jpeg q=82.
+// Миниатюры через stb (webp - через libwebp, stb его не декодирует):
+// decode -> resize -> поворот по EXIF -> jpeg q=82.
 // Прозрачность заливаем темным фоном. Слишком большие картинки (> kMaxPixels) не декодим
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
@@ -27,8 +28,11 @@
 #pragma GCC diagnostic pop
 #endif
 
+#include <webp/decode.h>
+
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -175,6 +179,55 @@ struct Image {
     return out;
 }
 
+// RIFF....WEBP - magic webp, правила считают его Photo.
+[[nodiscard]] bool isWebp(std::span<const std::byte> d) {
+    return d.size() >= 12 && std::memcmp(d.data(), "RIFF", 4) == 0 &&
+           std::memcmp(d.data() + 8, "WEBP", 4) == 0;
+}
+
+// Общий хвост: RGBA-пиксели -> фон под альфой -> ресайз -> поворот EXIF -> jpeg.
+[[nodiscard]] Bytes rgbaToThumbnail(const unsigned char* rgba, int w, int h, int orientation) {
+    // Прозрачность -> темный фон: в jpeg альфы нет.
+    const auto pixels = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+    Image full{w, h, std::vector<unsigned char>(pixels * 3)};
+    for (std::size_t p = 0; p < pixels; ++p) {
+        const unsigned a = rgba[p * 4 + 3];
+        for (std::size_t c = 0; c < 3; ++c) {
+            const unsigned v = rgba[p * 4 + c];
+            full.rgb[p * 3 + c] =
+                static_cast<unsigned char>((v * a + kBackground[c] * (255 - a) + 127) / 255);
+        }
+    }
+
+    const double scale = std::min(1.0, static_cast<double>(domain::kThumbnailMaxSide) /
+                                           static_cast<double>(std::max(w, h)));
+    Image small = std::move(full);
+    if (scale < 1.0) {
+        Image resized;
+        resized.width = std::max(1, static_cast<int>(w * scale + 0.5));
+        resized.height = std::max(1, static_cast<int>(h * scale + 0.5));
+        resized.rgb.resize(static_cast<std::size_t>(resized.width) * resized.height * 3);
+        if (stbir_resize_uint8_linear(small.rgb.data(), w, h, 0, resized.rgb.data(),
+                                      resized.width, resized.height, 0, STBIR_RGB) == nullptr) {
+            return {};
+        }
+        small = std::move(resized);
+    }
+    const Image oriented = orient(small, orientation);
+
+    Bytes jpeg;
+    auto write = [](void* ctx, void* bytes, int size) {
+        auto* out = static_cast<Bytes*>(ctx);
+        const auto* p = static_cast<const std::byte*>(bytes);
+        out->insert(out->end(), p, p + size);
+    };
+    if (stbi_write_jpg_to_func(write, &jpeg, oriented.width, oriented.height, 3,
+                               oriented.rgb.data(), kJpegQuality) == 0) {
+        return {};
+    }
+    return jpeg;
+}
+
 class StbThumbnailer final : public domain::Thumbnailer {
 public:
     Result<Bytes> make(std::span<const std::byte> image) override {
@@ -182,10 +235,32 @@ public:
             image.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
             return Bytes{};
         }
-        const auto* data = reinterpret_cast<const stbi_uc*>(image.data());
+        const auto* data = reinterpret_cast<const unsigned char*>(image.data());
         const int len = static_cast<int>(image.size());
         int w = 0;
         int h = 0;
+
+        if (isWebp(image)) {
+            WebPBitstreamFeatures features{};
+            if (WebPGetFeatures(data, len, &features) != VP8_STATUS_OK) {
+                return Bytes{};
+            }
+            // анимацию WebPDecode не декодирует (нужен demux) - будет заглушка
+            if (features.has_animation != 0 || features.width <= 0 || features.height <= 0 ||
+                static_cast<std::uint64_t>(features.width) *
+                        static_cast<std::uint64_t>(features.height) >
+                    kMaxPixels) {
+                return Bytes{};
+            }
+            std::unique_ptr<unsigned char, decltype(&WebPFree)> rgba(
+                WebPDecodeRGBA(data, len, &w, &h), &WebPFree);
+            if (rgba == nullptr || w <= 0 || h <= 0) {
+                return Bytes{};
+            }
+            // EXIF-чанк webp не разбираем: ориентация как есть
+            return rgbaToThumbnail(rgba.get(), w, h, 1);
+        }
+
         int channels = 0;
         if (stbi_info_from_memory(data, len, &w, &h, &channels) == 0 || w <= 0 || h <= 0 ||
             static_cast<std::uint64_t>(w) * static_cast<std::uint64_t>(h) > kMaxPixels) {
@@ -196,47 +271,7 @@ public:
         if (!rgba) {
             return Bytes{};
         }
-
-        // Прозрачность -> темный фон: в jpeg альфы нет.
-        const auto pixels = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
-        Image full{w, h, std::vector<unsigned char>(pixels * 3)};
-        for (std::size_t p = 0; p < pixels; ++p) {
-            const unsigned a = rgba.get()[p * 4 + 3];
-            for (std::size_t c = 0; c < 3; ++c) {
-                const unsigned v = rgba.get()[p * 4 + c];
-                full.rgb[p * 3 + c] =
-                    static_cast<unsigned char>((v * a + kBackground[c] * (255 - a) + 127) / 255);
-            }
-        }
-        rgba.reset();
-
-        const double scale = std::min(1.0, static_cast<double>(domain::kThumbnailMaxSide) /
-                                               static_cast<double>(std::max(w, h)));
-        Image small = std::move(full);
-        if (scale < 1.0) {
-            Image resized;
-            resized.width = std::max(1, static_cast<int>(w * scale + 0.5));
-            resized.height = std::max(1, static_cast<int>(h * scale + 0.5));
-            resized.rgb.resize(static_cast<std::size_t>(resized.width) * resized.height * 3);
-            if (stbir_resize_uint8_linear(small.rgb.data(), w, h, 0, resized.rgb.data(),
-                                          resized.width, resized.height, 0, STBIR_RGB) == nullptr) {
-                return Bytes{};
-            }
-            small = std::move(resized);
-        }
-        const Image oriented = orient(small, jpegOrientation(image));
-
-        Bytes jpeg;
-        auto write = [](void* ctx, void* bytes, int size) {
-            auto* out = static_cast<Bytes*>(ctx);
-            const auto* p = static_cast<const std::byte*>(bytes);
-            out->insert(out->end(), p, p + size);
-        };
-        if (stbi_write_jpg_to_func(write, &jpeg, oriented.width, oriented.height, 3,
-                                   oriented.rgb.data(), kJpegQuality) == 0) {
-            return Bytes{};
-        }
-        return jpeg;
+        return rgbaToThumbnail(rgba.get(), w, h, jpegOrientation(image));
     }
 };
 

@@ -1,11 +1,12 @@
-# safebox-infra: все сторонние либы (sodium, sqlite3, stb, miniz, fmt) подключены PRIVATE,
-# наружу торчит только factories.hpp
+# safebox-infra: все сторонние либы (sodium, sqlite3, stb, libwebp, miniz, fmt) подключены
+# PRIVATE, наружу торчит только factories.hpp
 
 find_package(unofficial-sodium CONFIG REQUIRED)
 find_package(unofficial-sqlite3 CONFIG REQUIRED)
 find_package(miniz CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(Stb REQUIRED)
+find_package(WebP CONFIG REQUIRED)
 
 add_library(safebox-infra STATIC
     src/sodium_crypto.cpp
@@ -33,6 +34,7 @@ target_link_libraries(safebox-infra
             unofficial::sqlite3::sqlite3
             miniz::miniz
             fmt::fmt
+            WebP::webp
 )
 
 sbx_apply_warnings(safebox-infra)

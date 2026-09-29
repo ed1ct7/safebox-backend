@@ -14,7 +14,10 @@
 #endif
 
 #include <miniz.h>
+#include <webp/encode.h>
 
+#include <cstdint>
+#include <cstring>
 #include <random>
 
 #include "safebox/infra/factories.hpp"
@@ -57,6 +60,28 @@ std::pair<int, int> dimensions(const domain::Bytes& image) {
     REQUIRE(stbi_info_from_memory(reinterpret_cast<const stbi_uc*>(image.data()),
                                   static_cast<int>(image.size()), &w, &h, &c) == 1);
     return {w, h};
+}
+
+domain::Bytes encodeWebp(int w, int h, bool lossless) {
+    std::vector<unsigned char> pixels(static_cast<std::size_t>(w * h * 4));
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            auto* p = &pixels[static_cast<std::size_t>((y * w + x) * 4)];
+            p[0] = static_cast<unsigned char>(x);
+            p[1] = static_cast<unsigned char>(y);
+            p[2] = 128;
+            p[3] = 255;
+        }
+    }
+    std::uint8_t* encoded = nullptr;
+    const std::size_t size = lossless ? WebPEncodeLosslessRGBA(pixels.data(), w, h, w * 4, &encoded)
+                                      : WebPEncodeRGBA(pixels.data(), w, h, w * 4, 80.f, &encoded);
+    REQUIRE(encoded != nullptr);
+    REQUIRE(size > 0);
+    domain::Bytes out(size);
+    std::memcpy(out.data(), encoded, size);
+    WebPFree(encoded);
+    return out;
 }
 
 // APP1 Exif с одной записью Orientation сразу после SOI.
@@ -143,6 +168,27 @@ TEST_CASE("thumbnailer scales images and ignores non-images", "[media]") {
     auto nothing = thumbnailer->make({});
     REQUIRE(nothing.has_value());
     CHECK(nothing->empty());
+}
+
+TEST_CASE("thumbnailer decodes webp (lossy and lossless)", "[media][webp]") {
+    auto thumbnailer = infra::makeStbThumbnailer();
+
+    auto thumb = thumbnailer->make(encodeWebp(800, 600, false));
+    REQUIRE(thumb.has_value());
+    REQUIRE_FALSE(thumb->empty());
+    CHECK(static_cast<unsigned char>((*thumb)[0]) == 0xFF); // jpeg
+    CHECK(dimensions(*thumb) == std::pair{400, 300});
+
+    auto lossless = thumbnailer->make(encodeWebp(120, 80, true));
+    REQUIRE(lossless.has_value());
+    CHECK(dimensions(*lossless) == std::pair{120, 80}); // маленькие не увеличиваются
+
+    // webp-заголовок с битым полезным грузом - пустая миниатюра, не ошибка
+    auto broken = encodeWebp(300, 200, false);
+    broken.resize(broken.size() / 2);
+    auto brokenThumb = thumbnailer->make(broken);
+    REQUIRE(brokenThumb.has_value());
+    CHECK(brokenThumb->empty());
 }
 
 TEST_CASE("thumbnail honours EXIF orientation like the browser does", "[media][exif]") {

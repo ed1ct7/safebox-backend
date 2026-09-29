@@ -12,7 +12,8 @@
       "default-features": false
     },
     "stb",
-    "miniz"
+    "miniz",
+    "libwebp"
   ],
   "features": {
     "tests": {
