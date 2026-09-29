@@ -85,8 +85,41 @@ struct PreviewJob {
 }
 
 // Название страницы -> имя записи: не длиннее 200 символов, без запрещенных в имени.
+// Разделители заголовков ("HTML | MDN", "GitHub: ...") становятся тире, а не '_'.
 [[nodiscard]] std::string previewName(std::string_view title) {
-    return domain::sanitizeName(firstChars(title, kMaxPreviewNameChars));
+    std::string readable;
+    readable.reserve(title.size());
+    for (std::size_t i = 0; i < title.size(); ++i) {
+        const char c = title[i];
+        switch (c) {
+        case '|':
+        case '/':
+        case '\\':
+            readable.push_back('-');
+            break;
+        case ':': // "GitHub: Where" -> "GitHub - Where", "10:30" -> "10-30"
+            if (i + 1 < title.size() && title[i + 1] == ' ' && !readable.empty() &&
+                readable.back() != ' ') {
+                readable.push_back(' ');
+            }
+            readable.push_back('-');
+            break;
+        case '"':
+            readable.push_back('\'');
+            break;
+        case '?':
+        case '*':
+        case '<':
+        case '>':
+            break;
+        default:
+            if (c == ' ' && !readable.empty() && readable.back() == ' ') {
+                break; // "a : b" -> "a - b", без двойных пробелов
+            }
+            readable.push_back(c);
+        }
+    }
+    return domain::sanitizeName(firstChars(readable, kMaxPreviewNameChars));
 }
 
 // Тип содержимого без параметров, в нижнем регистре.

@@ -572,7 +572,7 @@ TEST_CASE("page titles become clean, unique names", "[links][preview]") {
     }
     f.publish("https://one.example/", "Одно и то же", "");
     f.publish("https://two.example/", "одно и то же", ""); // регистр не в счет
-    f.publish("https://three.example/", "a/b: c?", "");
+    f.publish("https://three.example/", "HTML | MDN: a/b?", ""); // разделители - тире
     f.publish("https://four.example/", long250, "");
 
     f.create(s, {link("https://one.example/")});
@@ -587,7 +587,7 @@ TEST_CASE("page titles become clean, unique names", "[links][preview]") {
     REQUIRE(names.size() == 4);
     CHECK(std::ranges::find(names, "Одно и то же") != names.end());
     CHECK(std::ranges::find(names, "одно и то же (2)") != names.end());
-    CHECK(std::ranges::find(names, "a_b_ c_") != names.end());
+    CHECK(std::ranges::find(names, "HTML - MDN - a-b") != names.end());
     const auto cut = std::ranges::find_if(
         names, [](const std::string& name) { return name.starts_with("жжж"); });
     REQUIRE(cut != names.end());
