@@ -68,22 +68,8 @@ public:
     explicit SqliteEntryRepository(Database& db) noexcept : db_(db) {}
 
     Result<EntryId> insert(const EntryRecord& record) override {
-        if (record.parentId) {
-            auto parent = db_.cached("SELECT is_folder FROM entries WHERE id = ?1");
-            if (!parent) {
-                return std::unexpected(parent.error());
-            }
-            (*parent)->bind(1, *record.parentId);
-            auto row = (*parent)->step();
-            if (!row) {
-                return std::unexpected(row.error());
-            }
-            if (!*row) {
-                return fail(Error::Code::NotFound, "Папка назначения не найдена");
-            }
-            if ((*parent)->int64(0) == 0) {
-                return fail(Error::Code::InvalidArgument, "Назначение не является папкой");
-            }
+        if (auto parent = requireParent(record.parentId); !parent) {
+            return std::unexpected(parent.error());
         }
         auto st = db_.cached("INSERT INTO entries(parent_id, is_folder, blob_id, thumb_blob_id,"
                              " enc_name, enc_meta) VALUES (?1, ?2, ?3, ?4, ?5, ?6)");
@@ -110,6 +96,32 @@ public:
             return std::unexpected(st.error());
         }
         (*st)->bind(1, encName).bind(2, encMeta).bind(3, id);
+        if (auto done = (*st)->run(); !done) {
+            return done;
+        }
+        if (db_.changes() == 0) {
+            return fail(Error::Code::NotFound, "Объект не найден");
+        }
+        return {};
+    }
+
+    Status update(const EntryRecord& record) override {
+        if (auto parent = requireParent(record.parentId); !parent) {
+            return parent;
+        }
+        auto st = db_.cached("UPDATE entries SET parent_id = ?1, is_folder = ?2, blob_id = ?3,"
+                             " thumb_blob_id = ?4, enc_name = ?5, enc_meta = ?6 WHERE id = ?7");
+        if (!st) {
+            return std::unexpected(st.error());
+        }
+        (*st)
+            ->bind(1, record.parentId)
+            .bind(2, std::int64_t{record.isFolder ? 1 : 0})
+            .bind(3, record.blobId)
+            .bind(4, record.thumbBlobId)
+            .bind(5, std::span<const std::byte>(record.encName))
+            .bind(6, std::span<const std::byte>(record.encMeta))
+            .bind(7, record.id);
         if (auto done = (*st)->run(); !done) {
             return done;
         }
@@ -230,6 +242,26 @@ public:
     }
 
 private:
+    // Родителем может быть любая запись (у файла бывают вложения).
+    Status requireParent(std::optional<EntryId> parent) {
+        if (!parent) {
+            return {};
+        }
+        auto st = db_.cached("SELECT 1 FROM entries WHERE id = ?1");
+        if (!st) {
+            return std::unexpected(st.error());
+        }
+        (*st)->bind(1, *parent);
+        auto row = (*st)->step();
+        if (!row) {
+            return std::unexpected(row.error());
+        }
+        if (!*row) {
+            return fail(Error::Code::NotFound, "Объект назначения не найден");
+        }
+        return {};
+    }
+
     Database& db_;
 };
 
@@ -252,14 +284,161 @@ public:
         return {};
     }
 
+    Status remove(BlobId id) override {
+        // Куски уходят каскадом (chunks.blob_id ON DELETE CASCADE).
+        auto st = db_.cached("DELETE FROM blobs WHERE id = ?1");
+        if (!st) {
+            return std::unexpected(st.error());
+        }
+        (*st)->bind(1, id);
+        return (*st)->run();
+    }
+
 private:
+    Database& db_;
+};
+
+class SqliteTagRepository final : public domain::TagRepository {
+public:
+    explicit SqliteTagRepository(Database& db) noexcept : db_(db) {}
+
+    Result<domain::CategoryId> insertCategory() override {
+        auto st = db_.cached("INSERT INTO tag_categories(enc_name) VALUES (x'')");
+        if (!st) {
+            return std::unexpected(st.error());
+        }
+        if (auto done = (*st)->run(); !done) {
+            return std::unexpected(done.error());
+        }
+        return db_.lastInsertRowId();
+    }
+
+    Status updateCategory(domain::CategoryId id, std::span<const std::byte> encName) override {
+        auto st = db_.cached("UPDATE tag_categories SET enc_name = ?1 WHERE id = ?2");
+        if (!st) {
+            return std::unexpected(st.error());
+        }
+        (*st)->bind(1, encName).bind(2, id);
+        return runChanging(**st, "Категория не найдена");
+    }
+
+    Status removeCategory(domain::CategoryId id) override {
+        auto st = db_.cached("DELETE FROM tag_categories WHERE id = ?1");
+        if (!st) {
+            return std::unexpected(st.error());
+        }
+        (*st)->bind(1, id);
+        return runChanging(**st, "Категория не найдена");
+    }
+
+    Result<std::vector<domain::TagCategoryRecord>> categories() override {
+        auto st = db_.cached("SELECT id, enc_name FROM tag_categories ORDER BY id");
+        if (!st) {
+            return std::unexpected(st.error());
+        }
+        std::vector<domain::TagCategoryRecord> out;
+        for (;;) {
+            auto row = (*st)->step();
+            if (!row) {
+                return std::unexpected(row.error());
+            }
+            if (!*row) {
+                return out;
+            }
+            out.push_back({(*st)->int64(0), (*st)->blob(1)});
+        }
+    }
+
+    Result<domain::TagId> insertTag(domain::CategoryId category) override {
+        if (auto found = requireCategory(category); !found) {
+            return std::unexpected(found.error());
+        }
+        auto st = db_.cached("INSERT INTO tags(category_id, enc_name) VALUES (?1, x'')");
+        if (!st) {
+            return std::unexpected(st.error());
+        }
+        (*st)->bind(1, category);
+        if (auto done = (*st)->run(); !done) {
+            return std::unexpected(done.error());
+        }
+        return db_.lastInsertRowId();
+    }
+
+    Status updateTag(domain::TagId id, domain::CategoryId category,
+                     std::span<const std::byte> encName) override {
+        if (auto found = requireCategory(category); !found) {
+            return found;
+        }
+        auto st = db_.cached("UPDATE tags SET category_id = ?1, enc_name = ?2 WHERE id = ?3");
+        if (!st) {
+            return std::unexpected(st.error());
+        }
+        (*st)->bind(1, category).bind(2, encName).bind(3, id);
+        return runChanging(**st, "Тег не найден");
+    }
+
+    Status removeTag(domain::TagId id) override {
+        auto st = db_.cached("DELETE FROM tags WHERE id = ?1");
+        if (!st) {
+            return std::unexpected(st.error());
+        }
+        (*st)->bind(1, id);
+        return runChanging(**st, "Тег не найден");
+    }
+
+    Result<std::vector<domain::TagRecord>> tags() override {
+        auto st = db_.cached("SELECT id, category_id, enc_name FROM tags ORDER BY id");
+        if (!st) {
+            return std::unexpected(st.error());
+        }
+        std::vector<domain::TagRecord> out;
+        for (;;) {
+            auto row = (*st)->step();
+            if (!row) {
+                return std::unexpected(row.error());
+            }
+            if (!*row) {
+                return out;
+            }
+            out.push_back({(*st)->int64(0), (*st)->int64(1), (*st)->blob(2)});
+        }
+    }
+
+private:
+    Status runChanging(Statement& st, std::string_view notFound) {
+        if (auto done = st.run(); !done) {
+            return done;
+        }
+        if (db_.changes() == 0) {
+            return fail(Error::Code::NotFound, std::string(notFound));
+        }
+        return {};
+    }
+
+    Status requireCategory(domain::CategoryId category) {
+        auto st = db_.cached("SELECT 1 FROM tag_categories WHERE id = ?1");
+        if (!st) {
+            return std::unexpected(st.error());
+        }
+        (*st)->bind(1, category);
+        auto row = (*st)->step();
+        if (!row) {
+            return std::unexpected(row.error());
+        }
+        if (!*row) {
+            return fail(Error::Code::NotFound, "Категория не найдена");
+        }
+        return {};
+    }
+
     Database& db_;
 };
 
 class SqliteUnitOfWork final : public domain::UnitOfWork {
 public:
     SqliteUnitOfWork(std::unique_lock<std::mutex> lock, Connection& conn) noexcept
-        : lock_(std::move(lock)), conn_(conn), entries_(*conn.db), blobs_(*conn.db) {}
+        : lock_(std::move(lock)), conn_(conn), entries_(*conn.db), blobs_(*conn.db),
+          tags_(*conn.db) {}
 
     ~SqliteUnitOfWork() override {
         if (!finished_) {
@@ -270,6 +449,7 @@ public:
 
     domain::EntryRepository& entries() override { return entries_; }
     domain::BlobRepository& blobs() override { return blobs_; }
+    domain::TagRepository& tags() override { return tags_; }
 
     Status saveMeta(const domain::SafeMeta& meta) override {
         auto st = conn_.db->cached(
@@ -305,6 +485,7 @@ private:
     Connection& conn_;
     SqliteEntryRepository entries_;
     SqliteBlobRepository blobs_;
+    SqliteTagRepository tags_;
     bool finished_ = false;
 };
 

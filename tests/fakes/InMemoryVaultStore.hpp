@@ -27,8 +27,12 @@ public:
         domain::SafeMeta meta;
         std::map<domain::EntryId, domain::EntryRecord> entries;
         std::map<domain::BlobId, Blob> blobs;
+        std::map<domain::CategoryId, domain::TagCategoryRecord> categories;
+        std::map<domain::TagId, domain::TagRecord> tags;
         domain::EntryId nextEntry = 1;
         domain::BlobId nextBlob = 1;
+        domain::CategoryId nextCategory = 1;
+        domain::TagId nextTag = 1;
     };
 
     // помощники тестов
@@ -175,11 +179,12 @@ private:
     class Uow final : public domain::UnitOfWork, domain::EntryRepository, domain::BlobRepository {
     public:
         Uow(InMemoryVaultStore& store, std::unique_lock<std::mutex> lock)
-            : store_(store), lock_(std::move(lock)), work_(*store.open_) {}
+            : store_(store), lock_(std::move(lock)), work_(*store.open_), tags_(work_) {}
         ~Uow() override { store_.owner_.store(std::thread::id{}); }
 
         domain::EntryRepository& entries() override { return *this; }
         domain::BlobRepository& blobs() override { return *this; }
+        domain::TagRepository& tags() override { return tags_; }
 
         domain::Status saveMeta(const domain::SafeMeta& meta) override {
             work_.meta = meta;
@@ -193,16 +198,8 @@ private:
 
         // EntryRepository
         domain::Result<domain::EntryId> insert(const domain::EntryRecord& record) override {
-            if (record.parentId) {
-                const auto it = work_.entries.find(*record.parentId);
-                if (it == work_.entries.end()) {
-                    return domain::fail(domain::Error::Code::NotFound,
-                                        "Папка назначения не найдена");
-                }
-                if (!it->second.isFolder) {
-                    return domain::fail(domain::Error::Code::InvalidArgument,
-                                        "Назначение не является папкой");
-                }
+            if (record.parentId && !work_.entries.contains(*record.parentId)) {
+                return domain::fail(domain::Error::Code::NotFound, "Объект назначения не найден");
             }
             auto copy = record;
             copy.id = work_.nextEntry++;
@@ -218,6 +215,18 @@ private:
             }
             it->second.encName.assign(encName.begin(), encName.end());
             it->second.encMeta.assign(encMeta.begin(), encMeta.end());
+            return {};
+        }
+
+        domain::Status update(const domain::EntryRecord& record) override {
+            const auto it = work_.entries.find(record.id);
+            if (it == work_.entries.end()) {
+                return domain::fail(domain::Error::Code::NotFound, "Объект не найден");
+            }
+            if (record.parentId && !work_.entries.contains(*record.parentId)) {
+                return domain::fail(domain::Error::Code::NotFound, "Объект назначения не найден");
+            }
+            it->second = record;
             return {};
         }
 
@@ -293,10 +302,103 @@ private:
             return {};
         }
 
+        // как внешний ключ entries.blob_id/thumb_blob_id в sqlite: занятый блоб не удалить
+        domain::Status remove(domain::BlobId id) override {
+            for (const auto& [eid, record] : work_.entries) {
+                if (record.blobId == id || record.thumbBlobId == id) {
+                    return domain::fail(domain::Error::Code::IntegrityError,
+                                        "Нарушена целостность данных сейфа");
+                }
+            }
+            work_.blobs.erase(id);
+            return {};
+        }
+
     private:
+        // TagRepository: отдельный объект, у него и у UnitOfWork есть метод tags()
+        class Tags final : public domain::TagRepository {
+        public:
+            explicit Tags(Db& work) noexcept : work_(work) {}
+
+            domain::Result<domain::CategoryId> insertCategory() override {
+                const auto id = work_.nextCategory++;
+                work_.categories[id] = domain::TagCategoryRecord{id, {}};
+                return id;
+            }
+
+            domain::Status updateCategory(domain::CategoryId id,
+                                          std::span<const std::byte> encName) override {
+                const auto it = work_.categories.find(id);
+                if (it == work_.categories.end()) {
+                    return domain::fail(domain::Error::Code::NotFound, "Категория не найдена");
+                }
+                it->second.encName.assign(encName.begin(), encName.end());
+                return {};
+            }
+
+            domain::Status removeCategory(domain::CategoryId id) override {
+                if (work_.categories.erase(id) == 0) {
+                    return domain::fail(domain::Error::Code::NotFound, "Категория не найдена");
+                }
+                std::erase_if(work_.tags,
+                              [id](const auto& item) { return item.second.categoryId == id; });
+                return {};
+            }
+
+            domain::Result<std::vector<domain::TagCategoryRecord>> categories() override {
+                std::vector<domain::TagCategoryRecord> out;
+                for (const auto& [id, record] : work_.categories) {
+                    out.push_back(record);
+                }
+                return out;
+            }
+
+            domain::Result<domain::TagId> insertTag(domain::CategoryId category) override {
+                if (!work_.categories.contains(category)) {
+                    return domain::fail(domain::Error::Code::NotFound, "Категория не найдена");
+                }
+                const auto id = work_.nextTag++;
+                work_.tags[id] = domain::TagRecord{id, category, {}};
+                return id;
+            }
+
+            domain::Status updateTag(domain::TagId id, domain::CategoryId category,
+                                     std::span<const std::byte> encName) override {
+                if (!work_.categories.contains(category)) {
+                    return domain::fail(domain::Error::Code::NotFound, "Категория не найдена");
+                }
+                const auto it = work_.tags.find(id);
+                if (it == work_.tags.end()) {
+                    return domain::fail(domain::Error::Code::NotFound, "Тег не найден");
+                }
+                it->second.categoryId = category;
+                it->second.encName.assign(encName.begin(), encName.end());
+                return {};
+            }
+
+            domain::Status removeTag(domain::TagId id) override {
+                if (work_.tags.erase(id) == 0) {
+                    return domain::fail(domain::Error::Code::NotFound, "Тег не найден");
+                }
+                return {};
+            }
+
+            domain::Result<std::vector<domain::TagRecord>> tags() override {
+                std::vector<domain::TagRecord> out;
+                for (const auto& [id, record] : work_.tags) {
+                    out.push_back(record);
+                }
+                return out;
+            }
+
+        private:
+            Db& work_;
+        };
+
         InMemoryVaultStore& store_;
         std::unique_lock<std::mutex> lock_;
         Db work_;
+        Tags tags_;
     };
 
     // BlobStore: сразу в "файл", под мьютексом на каждую операцию

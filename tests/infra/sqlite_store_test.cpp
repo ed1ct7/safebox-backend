@@ -2,6 +2,7 @@
 
 #include "safebox/domain/model/safe_format.hpp"
 #include "safebox/infra/factories.hpp"
+#include "store_contract.hpp"
 #include "temp_dir.hpp"
 
 using namespace safebox;
@@ -289,4 +290,111 @@ TEST_CASE("meta can be re-saved in a transaction (password change)", "[sqlite][U
     REQUIRE(store->open(path).has_value());
     CHECK(store->meta()->salt == next.salt);
     CHECK(store->meta()->envelope == next.envelope);
+}
+
+TEST_CASE("sqlite store passes the shared storage contract", "[sqlite][contract]") {
+    TempDir dir;
+    auto store = infra::makeSqliteVaultStore();
+    REQUIRE(store->create(dir / "v.safebox", sampleMeta()).has_value());
+    SECTION("entry update") {
+        checkEntryUpdate(*store);
+    }
+    SECTION("blob remove") {
+        checkBlobRemove(*store);
+    }
+    SECTION("tag repository") {
+        checkTagRepository(*store);
+    }
+}
+
+TEST_CASE("categories and tags persist; removing a category cascades on disk",
+          "[sqlite][tags][format]") {
+    TempDir dir;
+    const auto path = dir / "v.safebox";
+    auto store = infra::makeSqliteVaultStore();
+    REQUIRE(store->create(path, sampleMeta()).has_value());
+
+    domain::CategoryId doomed = 0;
+    domain::CategoryId kept = 0;
+    {
+        auto uow = store->begin();
+        auto& tags = (*uow)->tags();
+        doomed = tags.insertCategory().value();
+        kept = tags.insertCategory().value();
+        REQUIRE(tags.updateCategory(doomed, domain::toBytes("doomed")).has_value());
+        REQUIRE(tags.updateCategory(kept, domain::toBytes("kept")).has_value());
+        for (const auto category : {doomed, kept, doomed}) {
+            const auto id = tags.insertTag(category).value();
+            REQUIRE(tags.updateTag(id, category, domain::toBytes("tag-" + std::to_string(id)))
+                        .has_value());
+        }
+        REQUIRE((*uow)->commit().has_value());
+    }
+    store->close();
+    REQUIRE(store->open(path).has_value());
+    {
+        auto uow = store->begin();
+        auto& tags = (*uow)->tags();
+        REQUIRE(tags.categories()->size() == 2);
+        REQUIRE(tags.tags()->size() == 3);
+        REQUIRE(tags.removeCategory(doomed).has_value());
+        REQUIRE((*uow)->commit().has_value());
+    }
+    store->close();
+    REQUIRE(store->open(path).has_value());
+    auto uow = store->begin();
+    auto categories = (*uow)->tags().categories();
+    REQUIRE(categories->size() == 1);
+    CHECK((*categories)[0].id == kept);
+    CHECK((*categories)[0].encName == domain::toBytes("kept"));
+    auto remaining = (*uow)->tags().tags();
+    REQUIRE(remaining->size() == 1);
+    CHECK((*remaining)[0].categoryId == kept);
+    CHECK((*remaining)[0].encName == domain::toBytes("tag-2"));
+}
+
+TEST_CASE("a file with user_version 1 is refused with a clear message", "[sqlite][format]") {
+    CHECK(domain::kFormatVersion == 2);
+    TempDir dir;
+    const auto path = dir / "old.safebox";
+    {
+        auto store = infra::makeSqliteVaultStore();
+        REQUIRE(store->create(path, sampleMeta()).has_value());
+    }
+    auto bytes = readFile(path);
+    REQUIRE(bytes.size() >= 100);
+    REQUIRE(be32(bytes, 60) == 2);
+
+    const auto withVersion = [&](char version) {
+        auto patched = bytes;
+        patched[60] = patched[61] = patched[62] = '\0';
+        patched[63] = version;
+        writeFile(path, patched);
+    };
+
+    withVersion(1);
+    auto store = infra::makeSqliteVaultStore();
+    auto opened = store->open(path);
+    REQUIRE_FALSE(opened.has_value());
+    CHECK(opened.error().code == Code::NotASafe);
+    CHECK(opened.error().message ==
+          "Сейф в старом формате (версия 1) не поддерживается - создайте новый сейф");
+    CHECK_FALSE(store->isOpen());
+    auto inspected = store->inspect(path);
+    REQUIRE_FALSE(inspected.has_value());
+    CHECK(inspected.error().code == Code::NotASafe);
+    CHECK(inspected.error().message == opened.error().message);
+
+    // файл новее - другое сообщение, как и раньше
+    withVersion(3);
+    auto newer = store->open(path);
+    REQUIRE_FALSE(newer.has_value());
+    CHECK(newer.error().code == Code::NotASafe);
+    CHECK(newer.error().message.find("новой версией") != std::string::npos);
+
+    withVersion(0);
+    CHECK(store->open(path).error().message == "Файл не является сейфом SafeBox");
+
+    withVersion(2); // и без подмены файл открывается
+    REQUIRE(store->open(path).has_value());
 }

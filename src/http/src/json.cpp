@@ -103,7 +103,21 @@ Json toJson(const domain::Entry& entry) {
         {"hasThumbnail", entry.hasThumbnail()},
         {"createdAt", entry.meta.createdAt},
         {"modifiedAt", entry.meta.modifiedAt},
+        {"sourceModifiedAt",
+         entry.meta.sourceModifiedAt ? Json(*entry.meta.sourceModifiedAt) : Json(nullptr)},
+        {"description", entry.meta.description},
+        {"childCount", entry.childCount},
     };
+    Json tags = Json::array();
+    for (const auto& tag : entry.meta.tags) {
+        tags.push_back(Json{{"tagId", tag.tagId}, {"inherit", tag.inherit}});
+    }
+    j["tags"] = std::move(tags);
+    Json inherited = Json::array();
+    for (const auto& tag : entry.inheritedTags) {
+        inherited.push_back(Json{{"tagId", tag.tagId}, {"fromId", tag.fromId}});
+    }
+    j["inheritedTags"] = std::move(inherited);
     if (entry.meta.kind == domain::Kind::Link) {
         j["url"] = entry.meta.url;
         j["domain"] = domain::urlHost(entry.meta.url);
@@ -125,7 +139,7 @@ Json toJson(const app::FolderListing& listing) {
         entries.push_back(toJson(entry));
     }
     return Json{
-        {"folder", listing.folder ? toJson(*listing.folder) : Json(nullptr)},
+        {"parent", listing.parent ? toJson(*listing.parent) : Json(nullptr)},
         {"path", toJson(listing.path)},
         {"entries", std::move(entries)},
     };
@@ -136,6 +150,18 @@ Json toJson(const app::FolderNode& node) {
         {"id", node.id},
         {"parentId", node.parentId ? Json(*node.parentId) : Json(nullptr)},
         {"name", node.name},
+    };
+}
+
+Json toJson(const app::MoveConflict& conflict) {
+    return Json{{"id", conflict.id}, {"existing", toJson(conflict.existing)}};
+}
+
+Json toJson(const app::MoveResult& result) {
+    return Json{
+        {"moved", result.moved},
+        {"replaced", result.replaced},
+        {"skipped", result.skipped},
     };
 }
 
@@ -156,7 +182,22 @@ Json toJson(const app::PublicStatus& status) {
 }
 
 Json toJson(const domain::SearchHit& hit) {
-    return Json{{"entry", toJson(hit.entry)}, {"path", toJson(hit.path)}};
+    Json matchedIn(nullptr);
+    switch (hit.matchedIn) {
+    case domain::MatchedIn::None:
+        break;
+    case domain::MatchedIn::Name:
+        matchedIn = "name";
+        break;
+    case domain::MatchedIn::Description:
+        matchedIn = "description";
+        break;
+    }
+    return Json{
+        {"entry", toJson(hit.entry)},
+        {"path", toJson(hit.path)},
+        {"matchedIn", std::move(matchedIn)},
+    };
 }
 
 Json toJson(const domain::ImportResult& result) {
@@ -165,10 +206,8 @@ Json toJson(const domain::ImportResult& result) {
         failures.push_back(Json{{"path", f.path}, {"message", f.message}});
     }
     return Json{
-        {"imported", result.imported},
-        {"failed", result.failed},
-        {"skipped", result.skipped},
-        {"failures", std::move(failures)},
+        {"imported", result.imported}, {"replaced", result.replaced},     {"failed", result.failed},
+        {"skipped", result.skipped},   {"failures", std::move(failures)},
     };
 }
 

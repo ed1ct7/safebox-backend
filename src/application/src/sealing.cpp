@@ -1,11 +1,14 @@
-// AAD: имя/мета = версия|entry_id|тег поля, кусок = версия|blob_id|idx|last.
-// Так имена нельзя переставить между записями, а куски между блобами.
+// AAD: имя/мета = версия|entry_id|тег поля, кусок = версия|blob_id|idx|last, имя тега еще и с
+// его category_id. Так имена нельзя переставить между записями, куски между блобами, а тег
+// в другую категорию.
 // В enc_meta еще лежат копии blob_id/thumb_blob_id, их сверяем с открытыми колонками.
 //
-// формат enc_meta v1 (little-endian):
-//   u8 layout=1 | u8 kind | u64 size | i64 createdAt | i64 modifiedAt |
-//   u8 flags (bit0 blob, bit1 thumb) | [i64 blobId] | [i64 thumbBlobId] |
-//   u16 len + mime | u32 len + url
+// формат enc_meta v2 (little-endian):
+//   u8 layout=2 | u8 kind | u64 size | i64 createdAt | i64 modifiedAt |
+//   u8 flags (bit0 blob, bit1 thumb, bit2 sourceModifiedAt, bit3 nameByUser,
+//             bit4 descriptionByUser) | [i64 blobId] | [i64 thumbBlobId] |
+//   [i64 sourceModifiedAt] | u16 len + mime | u32 len + url | u32 len + description |
+//   u16 n + n * (i64 tagId | u8 tagFlags: bit0 inherit)
 #include "sealing.hpp"
 
 #include <algorithm>
@@ -23,9 +26,14 @@ using domain::Result;
 
 namespace {
 
-constexpr std::uint8_t kMetaLayout = 1;
+constexpr std::uint8_t kMetaLayout = 2;
 constexpr std::uint8_t kHasBlob = 0x01;
 constexpr std::uint8_t kHasThumb = 0x02;
+constexpr std::uint8_t kHasSourceModified = 0x04;
+constexpr std::uint8_t kNameByUser = 0x08;
+constexpr std::uint8_t kDescriptionByUser = 0x10;
+constexpr std::uint8_t kKnownFlags = 0x1F;
+constexpr std::uint8_t kTagInherit = 0x01;
 
 class Writer {
 public:
@@ -90,13 +98,18 @@ Bytes encodeMeta(const domain::EntryMeta& meta) {
     w.put(meta.size);
     w.put(meta.createdAt);
     w.put(meta.modifiedAt);
-    w.put(static_cast<std::uint8_t>((meta.blobId ? kHasBlob : 0) |
-                                    (meta.thumbBlobId ? kHasThumb : 0)));
+    w.put(static_cast<std::uint8_t>(
+        (meta.blobId ? kHasBlob : 0) | (meta.thumbBlobId ? kHasThumb : 0) |
+        (meta.sourceModifiedAt ? kHasSourceModified : 0) | (meta.nameByUser ? kNameByUser : 0) |
+        (meta.descriptionByUser ? kDescriptionByUser : 0)));
     if (meta.blobId) {
         w.put(*meta.blobId);
     }
     if (meta.thumbBlobId) {
         w.put(*meta.thumbBlobId);
+    }
+    if (meta.sourceModifiedAt) {
+        w.put(*meta.sourceModifiedAt);
     }
     const auto mimeLen =
         std::min<std::size_t>(meta.mime.size(), std::numeric_limits<std::uint16_t>::max());
@@ -104,6 +117,15 @@ Bytes encodeMeta(const domain::EntryMeta& meta) {
     w.text(std::string_view(meta.mime).substr(0, mimeLen));
     w.put(static_cast<std::uint32_t>(meta.url.size()));
     w.text(meta.url);
+    w.put(static_cast<std::uint32_t>(meta.description.size()));
+    w.text(meta.description);
+    const auto tagCount =
+        std::min<std::size_t>(meta.tags.size(), std::numeric_limits<std::uint16_t>::max());
+    w.put(static_cast<std::uint16_t>(tagCount));
+    for (std::size_t i = 0; i < tagCount; ++i) {
+        w.put(meta.tags[i].tagId);
+        w.put(static_cast<std::uint8_t>(meta.tags[i].inherit ? kTagInherit : 0));
+    }
     return std::move(w.out);
 }
 
@@ -116,10 +138,12 @@ Result<domain::EntryMeta> decodeMeta(std::span<const std::byte> bytes) {
     if (!r.get(layout) || layout != kMetaLayout || !r.get(kind) ||
         kind > static_cast<std::uint8_t>(domain::Kind::Link) || !r.get(meta.size) ||
         !r.get(meta.createdAt) || !r.get(meta.modifiedAt) || !r.get(flags) ||
-        (flags & ~(kHasBlob | kHasThumb)) != 0) {
+        (flags & ~kKnownFlags) != 0) {
         return corrupted();
     }
     meta.kind = static_cast<domain::Kind>(kind);
+    meta.nameByUser = (flags & kNameByUser) != 0;
+    meta.descriptionByUser = (flags & kDescriptionByUser) != 0;
     if ((flags & kHasBlob) != 0) {
         domain::BlobId id = 0;
         if (!r.get(id)) {
@@ -134,10 +158,33 @@ Result<domain::EntryMeta> decodeMeta(std::span<const std::byte> bytes) {
         }
         meta.thumbBlobId = id;
     }
+    if ((flags & kHasSourceModified) != 0) {
+        std::int64_t modified = 0;
+        if (!r.get(modified)) {
+            return corrupted();
+        }
+        meta.sourceModifiedAt = modified;
+    }
     std::uint16_t mimeLen = 0;
     std::uint32_t urlLen = 0;
+    std::uint32_t descriptionLen = 0;
+    std::uint16_t tagCount = 0;
     if (!r.get(mimeLen) || !r.text(mimeLen, meta.mime) || !r.get(urlLen) ||
-        !r.text(urlLen, meta.url) || !r.done()) {
+        !r.text(urlLen, meta.url) || !r.get(descriptionLen) ||
+        !r.text(descriptionLen, meta.description) || !r.get(tagCount)) {
+        return corrupted();
+    }
+    meta.tags.reserve(tagCount);
+    for (std::uint16_t i = 0; i < tagCount; ++i) {
+        domain::TagAssignment tag;
+        std::uint8_t tagFlags = 0;
+        if (!r.get(tag.tagId) || !r.get(tagFlags) || (tagFlags & ~kTagInherit) != 0) {
+            return corrupted();
+        }
+        tag.inherit = (tagFlags & kTagInherit) != 0;
+        meta.tags.push_back(tag);
+    }
+    if (!r.done()) {
         return corrupted();
     }
     return meta;
@@ -165,6 +212,41 @@ Result<Bytes> Sealer::sealMeta(domain::EntryId id, const domain::EntryMeta& meta
     auto sealed = crypto_.seal(keys_.names, plain, domain::aad::field(id, domain::FieldTag::Meta));
     domain::secureWipe(plain);
     return sealed;
+}
+
+Result<Bytes> Sealer::sealCategoryName(domain::CategoryId id, std::string_view name) const {
+    return crypto_.seal(keys_.names, domain::asBytes(name), domain::aad::categoryName(id));
+}
+
+Result<domain::TagCategory> Sealer::openCategory(const domain::TagCategoryRecord& record) const {
+    auto name = crypto_.open(keys_.names, record.encName, domain::aad::categoryName(record.id));
+    if (!name) {
+        return corrupted();
+    }
+    domain::TagCategory category;
+    category.id = record.id;
+    category.name.assign(domain::asChars(*name));
+    domain::secureWipe(*name);
+    return category;
+}
+
+Result<Bytes> Sealer::sealTagName(domain::TagId id, domain::CategoryId category,
+                                  std::string_view name) const {
+    return crypto_.seal(keys_.names, domain::asBytes(name), domain::aad::tagName(id, category));
+}
+
+Result<domain::Tag> Sealer::openTag(const domain::TagRecord& record) const {
+    auto name = crypto_.open(keys_.names, record.encName,
+                             domain::aad::tagName(record.id, record.categoryId));
+    if (!name) {
+        return corrupted();
+    }
+    domain::Tag tag;
+    tag.id = record.id;
+    tag.categoryId = record.categoryId;
+    tag.name.assign(domain::asChars(*name));
+    domain::secureWipe(*name);
+    return tag;
 }
 
 Result<domain::Entry> Sealer::openEntry(const domain::EntryRecord& record) const {

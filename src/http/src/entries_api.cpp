@@ -1,4 +1,4 @@
-// /api/v1/entries, /api/v1/folders
+// /api/v1/entries (список любой записи, правка, перенос, удаление), /api/v1/folders
 #include "dto.hpp"
 
 namespace safebox::http {
@@ -13,6 +13,89 @@ namespace {
         sendError(res, 400, "bad_request", "Некорректный идентификатор объекта");
     }
     return id;
+}
+
+// Поле "ids": массив положительных целых; иначе 400 уже отправлен.
+[[nodiscard]] std::optional<std::vector<domain::EntryId>> readIds(const Json& body,
+                                                                  httplib::Response& res) {
+    const auto it = body.find("ids");
+    if (it == body.end() || !it->is_array()) {
+        sendError(res, 400, "bad_request", "Поле 'ids' должно быть массивом идентификаторов");
+        return std::nullopt;
+    }
+    std::vector<domain::EntryId> ids;
+    for (const auto& value : *it) {
+        if (!value.is_number_integer() || value.get<std::int64_t>() <= 0) {
+            sendError(res, 400, "bad_request", "Некорректный идентификатор объекта");
+            return std::nullopt;
+        }
+        ids.push_back(value.get<domain::EntryId>());
+    }
+    return ids;
+}
+
+// Поле "parentId": число или null (корень), само поле обязательно; иначе 400 уже отправлен.
+[[nodiscard]] bool readParent(const Json& body, std::optional<domain::EntryId>& parent,
+                              httplib::Response& res) {
+    const auto it = body.find("parentId");
+    if (it != body.end() && it->is_null()) {
+        parent.reset();
+        return true;
+    }
+    if (it == body.end() || !it->is_number_integer() || it->get<std::int64_t>() <= 0) {
+        sendError(res, 400, "bad_request", "Поле 'parentId' должно быть числом или null");
+        return false;
+    }
+    parent = it->get<domain::EntryId>();
+    return true;
+}
+
+// Необязательное строковое поле; неверный тип -> 400 уже отправлен.
+[[nodiscard]] bool readOptionalString(const Json& body, const char* field,
+                                      std::optional<std::string>& value, httplib::Response& res) {
+    const auto it = body.find(field);
+    if (it == body.end()) {
+        return true;
+    }
+    if (!it->is_string()) {
+        sendError(res, 400, "bad_request", std::string("Поле '") + field + "' должно быть строкой");
+        return false;
+    }
+    value = it->get<std::string>();
+    return true;
+}
+
+// Необязательное "resolutions": {"<id>": "keepBoth"|"replace"|"skip"}; иначе 400 уже отправлен.
+[[nodiscard]] bool readResolutions(const Json& body,
+                                   std::unordered_map<domain::EntryId, app::ConflictPolicy>& out,
+                                   httplib::Response& res) {
+    const auto it = body.find("resolutions");
+    if (it == body.end()) {
+        return true;
+    }
+    if (!it->is_object()) {
+        sendError(res, 400, "bad_request", "Поле 'resolutions' должно быть объектом");
+        return false;
+    }
+    for (const auto& [key, value] : it->items()) {
+        const auto id = parseId(key);
+        std::optional<app::ConflictPolicy> policy;
+        if (value.is_string()) {
+            if (value == "keepBoth") {
+                policy = app::ConflictPolicy::KeepBoth;
+            } else if (value == "replace") {
+                policy = app::ConflictPolicy::Replace;
+            } else if (value == "skip") {
+                policy = app::ConflictPolicy::Skip;
+            }
+        }
+        if (!id || !policy) {
+            sendError(res, 400, "bad_request", "Некорректное решение о конфликте имен");
+            return false;
+        }
+        out[*id] = *policy;
+    }
+    return true;
 }
 
 } // namespace
@@ -87,11 +170,18 @@ void registerEntriesApi(httplib::Server& server, ApiContext& ctx) {
                      if (!body) {
                          return;
                      }
-                     auto name = requireString(*body, "name", res);
-                     if (!name) {
+                     app::UpdateEntryCmd cmd;
+                     if (!readOptionalString(*body, "name", cmd.name, res) ||
+                         !readOptionalString(*body, "description", cmd.description, res) ||
+                         !readOptionalString(*body, "url", cmd.url, res)) {
                          return;
                      }
-                     auto entry = ctx.services.entries->rename(*lease, *id, *name);
+                     if (!cmd.name && !cmd.description && !cmd.url) {
+                         sendError(res, 400, "bad_request",
+                                   "Укажите хотя бы одно поле: name, description или url");
+                         return;
+                     }
+                     auto entry = ctx.services.entries->update(*lease, *id, cmd);
                      if (!entry) {
                          sendError(res, entry.error());
                          return;
@@ -128,26 +218,69 @@ void registerEntriesApi(httplib::Server& server, ApiContext& ctx) {
         if (!body) {
             return;
         }
-        const auto it = body->find("ids");
-        if (it == body->end() || !it->is_array()) {
-            sendError(res, 400, "bad_request", "Поле 'ids' должно быть массивом идентификаторов");
+        const auto ids = readIds(*body, res);
+        if (!ids) {
             return;
         }
-        std::vector<domain::EntryId> ids;
-        for (const auto& value : *it) {
-            if (!value.is_number_integer() || value.get<std::int64_t>() <= 0) {
-                sendError(res, 400, "bad_request", "Некорректный идентификатор объекта");
-                return;
-            }
-            ids.push_back(value.get<domain::EntryId>());
-        }
-        auto removed = ctx.services.entries->remove(*lease, ids);
+        auto removed = ctx.services.entries->remove(*lease, *ids);
         if (!removed) {
             sendError(res, removed.error());
             return;
         }
         sendJson(res, Json{{"removed", *removed}});
     });
+
+    server.Post("/api/v1/entries/move/plan",
+                [&ctx](const httplib::Request& req, httplib::Response& res) {
+                    auto lease = requireApi(ctx, req, res);
+                    if (!lease) {
+                        return;
+                    }
+                    auto body = readJsonObject(req, res);
+                    if (!body) {
+                        return;
+                    }
+                    const auto ids = readIds(*body, res);
+                    std::optional<domain::EntryId> parent;
+                    if (!ids || !readParent(*body, parent, res)) {
+                        return;
+                    }
+                    auto conflicts = ctx.services.entries->planMove(*lease, *ids, parent);
+                    if (!conflicts) {
+                        sendError(res, conflicts.error());
+                        return;
+                    }
+                    Json items = Json::array();
+                    for (const auto& conflict : *conflicts) {
+                        items.push_back(toJson(conflict));
+                    }
+                    sendJson(res, Json{{"conflicts", std::move(items)}});
+                });
+
+    server.Post("/api/v1/entries/move",
+                [&ctx](const httplib::Request& req, httplib::Response& res) {
+                    auto lease = requireApi(ctx, req, res);
+                    if (!lease) {
+                        return;
+                    }
+                    auto body = readJsonObject(req, res);
+                    if (!body) {
+                        return;
+                    }
+                    app::MoveCmd cmd;
+                    auto ids = readIds(*body, res);
+                    if (!ids || !readParent(*body, cmd.parent, res) ||
+                        !readResolutions(*body, cmd.resolutions, res)) {
+                        return;
+                    }
+                    cmd.ids = std::move(*ids);
+                    auto moved = ctx.services.entries->move(*lease, cmd);
+                    if (!moved) {
+                        sendError(res, moved.error());
+                        return;
+                    }
+                    sendJson(res, toJson(*moved));
+                });
 }
 
 } // namespace safebox::http

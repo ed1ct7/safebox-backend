@@ -17,7 +17,7 @@ using domain::Status;
 
 namespace {
 
-constexpr std::string_view kSchemaV1 = R"sql(
+constexpr std::string_view kSchemaV2 = R"sql(
 CREATE TABLE meta (
     id             INTEGER PRIMARY KEY CHECK (id = 1),
     format_version INTEGER NOT NULL,
@@ -53,6 +53,19 @@ CREATE TABLE entries (
 ) STRICT;
 
 CREATE INDEX entries_parent ON entries(parent_id);
+
+CREATE TABLE tag_categories (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    enc_name BLOB    NOT NULL
+) STRICT;
+
+CREATE TABLE tags (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    category_id INTEGER NOT NULL REFERENCES tag_categories(id) ON DELETE CASCADE,
+    enc_name    BLOB    NOT NULL
+) STRICT;
+
+CREATE INDEX tags_category ON tags(category_id);
 )sql";
 
 [[nodiscard]] std::uint32_t readBe32(const std::array<unsigned char, 100>& h, std::size_t at) {
@@ -62,6 +75,11 @@ CREATE INDEX entries_parent ON entries(parent_id);
 
 [[nodiscard]] std::unexpected<Error> notASafe() {
     return fail(Error::Code::NotASafe, "Файл не является сейфом SafeBox");
+}
+
+[[nodiscard]] std::unexpected<Error> oldFormat() {
+    return fail(Error::Code::NotASafe,
+                "Сейф в старом формате (версия 1) не поддерживается - создайте новый сейф");
 }
 
 } // namespace
@@ -86,6 +104,9 @@ Status probeHeader(const std::filesystem::path& path) {
     const auto version = readBe32(header, 60);
     if (version == 0) {
         return notASafe();
+    }
+    if (version < domain::kFormatVersion) {
+        return oldFormat();
     }
     if (version > domain::kFormatVersion) {
         return fail(Error::Code::NotASafe,
@@ -121,7 +142,7 @@ Status createSchema(Database& db, const domain::SafeMeta& meta) {
         return st;
     }
     auto body = [&]() -> Status {
-        if (auto st = db.exec(kSchemaV1); !st) {
+        if (auto st = db.exec(kSchemaV2); !st) {
             return st;
         }
         auto insert = db.prepare(
@@ -158,8 +179,13 @@ Status verifyOpened(Database& db) {
     if (!version) {
         return std::unexpected(version.error());
     }
-    if (*appId != domain::kApplicationId || *version < 1 ||
-        *version > static_cast<std::int64_t>(domain::kFormatVersion)) {
+    if (*appId != domain::kApplicationId || *version < 1) {
+        return notASafe();
+    }
+    if (*version < static_cast<std::int64_t>(domain::kFormatVersion)) {
+        return oldFormat();
+    }
+    if (*version > static_cast<std::int64_t>(domain::kFormatVersion)) {
         return notASafe();
     }
 
@@ -167,7 +193,8 @@ Status verifyOpened(Database& db) {
     auto st = db.prepare("SELECT"
                          " (SELECT count(*) FROM sqlite_schema WHERE type IN ('trigger', 'view')),"
                          " (SELECT count(*) FROM sqlite_schema WHERE type = 'table'"
-                         "   AND name IN ('meta', 'entries', 'blobs', 'chunks')),"
+                         "   AND name IN ('meta', 'entries', 'blobs', 'chunks',"
+                         "                'tag_categories', 'tags')),"
                          " (SELECT count(*) FROM meta)");
     if (!st) {
         return notASafe(); // нет таблицы meta и т.п.
@@ -176,17 +203,10 @@ Status verifyOpened(Database& db) {
     if (!row || !*row) {
         return notASafe();
     }
-    if (st->int64(0) != 0 || st->int64(1) != 4 || st->int64(2) != 1) {
+    if (st->int64(0) != 0 || st->int64(1) != 6 || st->int64(2) != 1) {
         return notASafe();
     }
 
-    // Миграции по user_version: версия 1 - текущая, мигрировать нечего.
-    switch (*version) {
-    case 1:
-        break;
-    default:
-        return notASafe();
-    }
     return {};
 }
 

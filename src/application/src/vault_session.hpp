@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "idle_policy.hpp"
@@ -29,11 +30,26 @@ namespace safebox::app {
 // кириллица; "ё" приравнена к "е".
 [[nodiscard]] std::string foldForSearch(std::string_view text);
 
+// Имя, не занятое среди соседей: "имя (2).ext", "имя (3).ext"... taken - folded-имена соседей
+// (результат туда не добавляется). Для папок расширения нет.
+[[nodiscard]] std::string uniqueName(std::string_view name, bool isFolder,
+                                     const std::unordered_set<std::string>& taken);
+
 class Catalog {
 public:
     struct Node {
-        domain::Entry entry;
-        std::string folded; // foldForSearch(entry.name)
+        domain::Entry entry; // без childCount и inheritedTags - их выдает describe()
+        std::string folded;  // foldForSearch(entry.name)
+        std::string foldedDescription;
+        std::size_t childCount = 0; // прямых детей
+    };
+    struct CategoryNode {
+        domain::TagCategory category;
+        std::string folded;
+    };
+    struct TagNode {
+        domain::Tag tag;
+        std::string folded;
     };
 
     Catalog() = default;
@@ -42,8 +58,10 @@ public:
     ~Catalog(); // имена стираются из памяти
 
     void add(domain::Entry entry);
-    // Списки детей: папки первыми, дальше по имени. Сироты (родитель не найден
-    // или не папка) показываются в корне, а не теряются.
+    void addCategory(domain::TagCategory category);
+    void addTag(domain::Tag tag);
+    // Списки детей (у любой записи, не только у папки): папки первыми, дальше по имени.
+    // Сироты (родитель не найден) и циклы показываются в корне, а не теряются.
     void finalize();
 
     [[nodiscard]] const Node* find(domain::EntryId id) const;
@@ -55,8 +73,30 @@ public:
         return nodes_;
     }
 
+    // Теги с inherit у предков (устойчиво к циклам): ближайший предок побеждает, теги, уже
+    // прямые у самой записи, не повторяются. По возрастанию tagId.
+    [[nodiscard]] std::vector<domain::InheritedTag> inheritedTags(domain::EntryId id) const;
+    // Прямые и унаследованные теги записи, по возрастанию, без повторов (для фильтра).
+    [[nodiscard]] std::vector<domain::TagId> effectiveTags(domain::EntryId id) const;
+    // ancestor - сама запись id или один из ее предков.
+    [[nodiscard]] bool isAncestorOrSelf(domain::EntryId ancestor, domain::EntryId id) const;
+    // Запись для ответа: с childCount и inheritedTags.
+    [[nodiscard]] domain::Entry describe(const Node& node) const;
+
+    [[nodiscard]] const std::unordered_map<domain::CategoryId, CategoryNode>&
+    categories() const noexcept {
+        return categories_;
+    }
+    [[nodiscard]] const std::unordered_map<domain::TagId, TagNode>& tags() const noexcept {
+        return tags_;
+    }
+    [[nodiscard]] const CategoryNode* findCategory(domain::CategoryId id) const;
+    [[nodiscard]] const TagNode* findTag(domain::TagId id) const;
+
 private:
     std::unordered_map<domain::EntryId, Node> nodes_;
+    std::unordered_map<domain::CategoryId, CategoryNode> categories_;
+    std::unordered_map<domain::TagId, TagNode> tags_;
     std::unordered_map<domain::EntryId, std::vector<domain::EntryId>> children_;
     std::vector<domain::EntryId> roots_;
 };
@@ -137,7 +177,7 @@ struct OperationContext {
 
 // Аренда -> сессия и ключи; закрывающийся/стертый сейф -> Locked.
 [[nodiscard]] domain::Result<OperationContext> contextOf(const Lease& lease);
-// Все записи одной транзакцией -> расшифровка вне мьютекса хранилища.
+// Записи, категории и теги одной транзакцией -> расшифровка вне мьютекса хранилища.
 [[nodiscard]] domain::Result<VaultSession::CatalogPtr> loadCatalog(domain::VaultStore& store,
                                                                    const Sealer& sealer);
 [[nodiscard]] domain::Result<VaultSession::CatalogPtr> catalogOf(const OperationContext& ctx,

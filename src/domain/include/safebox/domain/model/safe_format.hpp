@@ -1,8 +1,10 @@
 // Константы формата .safebox, подробно формат описан в Linqtab, «Формат файла *.safebox»
 // AAD (все little-endian):
-//   конверт     = версия u32 | соль 16 | ops u64 | mem u64
-//   кусок       = версия u32 | blob_id i64 | idx u32 | last u8
-//   поле записи = версия u32 | entry_id i64 | тег u8 (name=1, meta=2)
+//   конверт       = версия u32 | соль 16 | ops u64 | mem u64
+//   кусок         = версия u32 | blob_id i64 | idx u32 | last u8
+//   поле записи   = версия u32 | entry_id i64 | тег u8 (name=1, meta=2)
+//   имя категории = версия u32 | category_id i64 | 3
+//   имя тега      = версия u32 | tag_id i64 | 4 | category_id i64
 #pragma once
 
 #include <array>
@@ -16,7 +18,7 @@
 
 namespace safebox::domain {
 
-inline constexpr std::uint32_t kFormatVersion = 1;
+inline constexpr std::uint32_t kFormatVersion = 2;
 inline constexpr std::int32_t kApplicationId = 0x53424F58; // 'S' 'B' 'O' 'X'
 inline constexpr std::string_view kSafeExtension = ".safebox";
 
@@ -49,7 +51,7 @@ inline constexpr std::uint64_t kMaxKdfMem = 4ull * 1024 * 1024 * 1024;
 
 // Подключи мастер-ключа (crypto_kdf_derive_from_key: subkey_id = значение).
 enum class KeyPurpose : std::uint64_t {
-    Names = 1,      // enc_name + enc_meta
+    Names = 1,      // enc_name + enc_meta записей, имена категорий и тегов
     Content = 2,    // куски содержимого
     Thumbnails = 3, // куски миниатюр
 };
@@ -59,6 +61,8 @@ inline constexpr std::array<char, 8> kSubkeyContext{'S', 'B', 'O', 'X', 'K', 'E'
 enum class FieldTag : std::uint8_t {
     Name = 1,
     Meta = 2,
+    CategoryName = 3,
+    TagName = 4,
 };
 
 namespace aad {
@@ -101,6 +105,26 @@ inline void putLe(Bytes& out, T value) {
     detail::putLe(out, kFormatVersion);
     detail::putLe(out, entry);
     out.push_back(static_cast<std::byte>(tag));
+    return out;
+}
+
+// Открытый category_id входит в AAD: подмена категории у тега -> ошибка при открытии.
+[[nodiscard]] inline Bytes categoryName(CategoryId category) {
+    Bytes out;
+    out.reserve(13);
+    detail::putLe(out, kFormatVersion);
+    detail::putLe(out, category);
+    out.push_back(static_cast<std::byte>(FieldTag::CategoryName));
+    return out;
+}
+
+[[nodiscard]] inline Bytes tagName(TagId tag, CategoryId category) {
+    Bytes out;
+    out.reserve(21);
+    detail::putLe(out, kFormatVersion);
+    detail::putLe(out, tag);
+    out.push_back(static_cast<std::byte>(FieldTag::TagName));
+    detail::putLe(out, category);
     return out;
 }
 

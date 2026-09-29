@@ -199,19 +199,9 @@ private:
 class UniqueNames {
 public:
     [[nodiscard]] std::string take(const std::string& name, bool folder) {
-        if (used_.insert(foldForSearch(name)).second) {
-            return name;
-        }
-        const auto dot = folder ? std::string::npos : name.rfind('.');
-        const bool hasExt = dot != std::string::npos && dot > 0;
-        const std::string stem = hasExt ? name.substr(0, dot) : name;
-        const std::string ext = hasExt ? name.substr(dot) : std::string{};
-        for (int n = 2;; ++n) {
-            auto candidate = stem + " (" + std::to_string(n) + ")" + ext;
-            if (used_.insert(foldForSearch(candidate)).second) {
-                return candidate;
-            }
-        }
+        auto unique = uniqueName(name, folder, used_);
+        used_.insert(foldForSearch(unique));
+        return unique;
     }
 
 private:

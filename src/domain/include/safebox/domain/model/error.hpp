@@ -20,6 +20,7 @@ struct Error {
         IoError,
         IntegrityError,
         Cancelled,
+        PreviewFailed, // предпросмотр ссылки не загрузился (сеть, разбор)
         Internal,
     };
 
@@ -62,6 +63,8 @@ using Status = Result<void>;
         return "IntegrityError";
     case Error::Code::Cancelled:
         return "Cancelled";
+    case Error::Code::PreviewFailed:
+        return "PreviewFailed";
     case Error::Code::Internal:
         return "Internal";
     }

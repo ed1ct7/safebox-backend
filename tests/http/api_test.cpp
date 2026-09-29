@@ -289,6 +289,7 @@ TEST_CASE("domain errors map to the documented HTTP table", "[http][errors]") {
         {Code::IoError, 500, "io_error"},
         {Code::IntegrityError, 500, "integrity_error"},
         {Code::Internal, 500, "internal"},
+        {Code::PreviewFailed, 502, "preview_failed"},
     };
     for (const auto& row : table) {
         f.fakes.entries->getError = domain::Error{row.code, "сообщение"};
@@ -391,7 +392,7 @@ TEST_CASE("entries endpoints speak the documented DTO", "[http][entries]") {
     auto root = f.api("GET", "/api/v1/entries");
     REQUIRE(root.status == 200);
     const auto body = root.json();
-    CHECK(body["folder"].is_null());
+    CHECK(body["parent"].is_null());
     CHECK(body["path"].empty());
     REQUIRE(body["entries"].size() == 3);
     const auto& link = body["entries"][1];
@@ -402,7 +403,7 @@ TEST_CASE("entries endpoints speak the documented DTO", "[http][entries]") {
     CHECK(body["entries"][0]["parentId"].is_null());
 
     auto folder = f.api("GET", "/api/v1/entries?parentId=1");
-    CHECK(folder.json()["folder"]["name"] == "Отпуск");
+    CHECK(folder.json()["parent"]["name"] == "Отпуск");
     CHECK(folder.json()["path"][0]["name"] == "Отпуск");
     CHECK(folder.json()["entries"][0]["hasThumbnail"] == false);
     CHECK(f.api("GET", "/api/v1/entries?parentId=abc").status == 400);
@@ -412,15 +413,173 @@ TEST_CASE("entries endpoints speak the documented DTO", "[http][entries]") {
     CHECK(f.api("GET", "/api/v1/entries/-5").status == 400);
     CHECK(f.api("GET", "/api/v1/folders").json()["folders"][0]["name"] == "Отпуск");
 
-    auto renamed = f.api("PATCH", "/api/v1/entries/2", R"({"name":"берег.jpg"})");
-    CHECK(renamed.status == 200);
-    CHECK(renamed.json()["name"] == "берег.jpg");
-    CHECK(f.api("PATCH", "/api/v1/entries/2", R"({"title":"x"})").status == 400);
-
     CHECK(f.api("DELETE", "/api/v1/entries/3").json()["removed"] == 1);
     CHECK(f.fakes.entries->removed == std::vector<domain::EntryId>{3});
     CHECK(f.api("POST", "/api/v1/entries/delete", R"({"ids":[1,2]})").json()["removed"] == 2);
     CHECK(f.api("POST", "/api/v1/entries/delete", R"({"ids":[1,"x"]})").status == 400);
+}
+
+TEST_CASE("entries carry description, child count, tags and source time", "[http][entries]") {
+    HttpFixture f;
+    const auto photo = f.api("GET", "/api/v1/entries/2").json();
+    CHECK(photo["description"] == "закат на пляже");
+    CHECK(photo["childCount"] == 0);
+    CHECK(photo["sourceModifiedAt"] == 1'700'000'000'000);
+    REQUIRE(photo["tags"].size() == 2);
+    CHECK(photo["tags"][0] == http::Json({{"tagId", 7}, {"inherit", true}}));
+    CHECK(photo["tags"][1] == http::Json({{"tagId", 9}, {"inherit", false}}));
+    REQUIRE(photo["inheritedTags"].size() == 1);
+    CHECK(photo["inheritedTags"][0] == http::Json({{"tagId", 5}, {"fromId", 1}}));
+    CHECK_FALSE(photo.contains("previewPending")); // пока не выводится
+
+    const auto folder = f.api("GET", "/api/v1/entries/1").json();
+    CHECK(folder["childCount"] == 1);
+    CHECK(folder["description"] == "");
+    CHECK(folder["sourceModifiedAt"].is_null());
+    CHECK(folder["tags"].is_array());
+    CHECK(folder["tags"].empty());
+    CHECK(folder["inheritedTags"].is_array());
+    CHECK(folder["inheritedTags"].empty());
+
+    // те же поля в листинге и в результатах поиска
+    const auto listing = f.api("GET", "/api/v1/entries?parentId=1").json();
+    CHECK(listing["parent"]["childCount"] == 1);
+    CHECK(listing["entries"][0]["tags"].size() == 2);
+    const auto hit = f.api("GET", "/api/v1/search?q=a").json()["results"][0];
+    CHECK(hit["entry"]["description"] == "");
+    CHECK(hit["entry"]["childCount"] == 0);
+    CHECK(hit["entry"]["tags"].is_array());
+    CHECK(hit["entry"]["inheritedTags"].is_array());
+}
+
+TEST_CASE("search hits tell where the text matched", "[http][search]") {
+    HttpFixture f;
+    CHECK(f.api("GET", "/api/v1/search?q=a").json()["results"][0]["matchedIn"].is_null());
+    f.fakes.search->matchedIn = domain::MatchedIn::Name;
+    CHECK(f.api("GET", "/api/v1/search?q=a").json()["results"][0]["matchedIn"] == "name");
+    f.fakes.search->matchedIn = domain::MatchedIn::Description;
+    CHECK(f.api("GET", "/api/v1/search?q=a").json()["results"][0]["matchedIn"] == "description");
+}
+
+TEST_CASE("PATCH /entries/:id takes name, description and url", "[http][entries][update]") {
+    HttpFixture f;
+    auto renamed = f.api("PATCH", "/api/v1/entries/2", R"({"name":"берег.jpg"})");
+    CHECK(renamed.status == 200);
+    CHECK(renamed.json()["name"] == "берег.jpg");
+    REQUIRE(f.fakes.entries->lastUpdate.has_value());
+    CHECK(f.fakes.entries->lastUpdate->name == "берег.jpg");
+    CHECK_FALSE(f.fakes.entries->lastUpdate->description.has_value()); // не тронуто
+    CHECK_FALSE(f.fakes.entries->lastUpdate->url.has_value());
+
+    auto all = f.api("PATCH", "/api/v1/entries/3",
+                     R"({"name":"сайт","description":"про сайт","url":"https://example.org/x"})");
+    CHECK(all.status == 200);
+    CHECK(all.json()["url"] == "https://example.org/x");
+    CHECK(all.json()["description"] == "про сайт");
+    CHECK(f.fakes.entries->lastUpdate->name == "сайт");
+    CHECK(f.fakes.entries->lastUpdate->description == "про сайт");
+    CHECK(f.fakes.entries->lastUpdate->url == "https://example.org/x");
+
+    // пустое описание - значение (очистить), а не отсутствие поля
+    auto cleared = f.api("PATCH", "/api/v1/entries/2", R"({"description":""})");
+    CHECK(cleared.status == 200);
+    CHECK(f.fakes.entries->lastUpdate->description == "");
+    CHECK_FALSE(f.fakes.entries->lastUpdate->name.has_value());
+
+    // не то, что просили
+    CHECK(f.api("PATCH", "/api/v1/entries/2", R"({"title":"x"})").status == 400);
+    CHECK(f.api("PATCH", "/api/v1/entries/2", R"({})").status == 400);
+    CHECK(f.api("PATCH", "/api/v1/entries/2", R"({"name":5})").status == 400);
+    CHECK(f.api("PATCH", "/api/v1/entries/2", R"({"description":null})").status == 400);
+    CHECK(f.api("PATCH", "/api/v1/entries/2", R"({"url":["a"]})").status == 400);
+    CHECK(f.api("PATCH", "/api/v1/entries/abc", R"({"name":"x"})").status == 400);
+    CHECK(f.api("PATCH", "/api/v1/entries/99", R"({"name":"x"})").status == 404);
+
+    f.fakes.entries->updateError = domain::Error{Code::InvalidArgument, "Описание длиннее 64 КиБ"};
+    auto tooLong = f.api("PATCH", "/api/v1/entries/2", R"({"description":"x"})");
+    CHECK(tooLong.status == 422);
+    CHECK(tooLong.errorCode() == "invalid_argument");
+    CHECK(tooLong.json()["error"]["message"] == "Описание длиннее 64 КиБ");
+}
+
+TEST_CASE("move/plan lists name conflicts", "[http][entries][move]") {
+    HttpFixture f;
+    f.fakes.entries->conflicts = {{4, makeEntry(2, 1, domain::Kind::Photo, "море.jpg")}};
+    auto plan = f.api("POST", "/api/v1/entries/move/plan", R"({"ids":[4,3],"parentId":1})");
+    REQUIRE(plan.status == 200);
+    REQUIRE(plan.json()["conflicts"].size() == 1);
+    CHECK(plan.json()["conflicts"][0]["id"] == 4);
+    CHECK(plan.json()["conflicts"][0]["existing"]["name"] == "море.jpg");
+    CHECK(plan.json()["conflicts"][0]["existing"]["id"] == 2);
+    CHECK(f.fakes.entries->lastPlanIds == std::vector<domain::EntryId>{4, 3});
+    CHECK(f.fakes.entries->lastPlanParent == 1);
+
+    // null - корень
+    f.fakes.entries->conflicts.clear();
+    auto root = f.api("POST", "/api/v1/entries/move/plan", R"({"ids":[2],"parentId":null})");
+    REQUIRE(root.status == 200);
+    CHECK(root.json()["conflicts"].is_array());
+    CHECK(root.json()["conflicts"].empty());
+    CHECK_FALSE(f.fakes.entries->lastPlanParent.has_value());
+
+    for (const char* bad :
+         {R"({"parentId":1})", R"({"ids":"1","parentId":1})", R"({"ids":[1,"x"],"parentId":1})",
+          R"({"ids":[0],"parentId":1})", R"({"ids":[1]})", R"({"ids":[1],"parentId":"1"})",
+          R"({"ids":[1],"parentId":0})", R"({"ids":[1],"parentId":1.5})"}) {
+        INFO(bad);
+        CHECK(f.api("POST", "/api/v1/entries/move/plan", bad).status == 400);
+    }
+
+    f.fakes.entries->moveError = domain::Error{Code::InvalidArgument, "Нельзя переместить"};
+    auto refused = f.api("POST", "/api/v1/entries/move/plan", R"({"ids":[1],"parentId":2})");
+    CHECK(refused.status == 422);
+    f.fakes.entries->moveError = domain::Error{Code::NotFound, "Объект назначения не найден"};
+    CHECK(f.api("POST", "/api/v1/entries/move/plan", R"({"ids":[1],"parentId":99})").status == 404);
+}
+
+TEST_CASE("move takes the resolutions and answers with the counts", "[http][entries][move]") {
+    HttpFixture f;
+    f.fakes.entries->moveResult = {3, 2, 1};
+    auto moved = f.api(
+        "POST", "/api/v1/entries/move",
+        R"({"ids":[2,3,4],"parentId":1,"resolutions":{"2":"replace","3":"skip","4":"keepBoth"}})");
+    REQUIRE(moved.status == 200);
+    CHECK(moved.json() == http::Json({{"moved", 3}, {"replaced", 2}, {"skipped", 1}}));
+    REQUIRE(f.fakes.entries->lastMove.has_value());
+    const auto& cmd = *f.fakes.entries->lastMove;
+    CHECK(cmd.ids == std::vector<domain::EntryId>{2, 3, 4});
+    CHECK(cmd.parent == 1);
+    REQUIRE(cmd.resolutions.size() == 3);
+    CHECK(cmd.resolutions.at(2) == app::ConflictPolicy::Replace);
+    CHECK(cmd.resolutions.at(3) == app::ConflictPolicy::Skip);
+    CHECK(cmd.resolutions.at(4) == app::ConflictPolicy::KeepBoth);
+
+    // resolutions необязательны, parentId null - корень
+    auto plain = f.api("POST", "/api/v1/entries/move", R"({"ids":[2],"parentId":null})");
+    REQUIRE(plain.status == 200);
+    CHECK(f.fakes.entries->lastMove->resolutions.empty());
+    CHECK_FALSE(f.fakes.entries->lastMove->parent.has_value());
+
+    f.fakes.entries->lastMove.reset();
+    for (const char* bad : {R"({"ids":[2],"parentId":1,"resolutions":[]})",
+                            R"({"ids":[2],"parentId":1,"resolutions":{"2":"overwrite"}})",
+                            R"({"ids":[2],"parentId":1,"resolutions":{"x":"skip"}})",
+                            R"({"ids":[2],"parentId":1,"resolutions":{"2":1}})", R"({"ids":[2]})",
+                            R"({"parentId":1})"}) {
+        INFO(bad);
+        CHECK(f.api("POST", "/api/v1/entries/move", bad).status == 400);
+    }
+    CHECK_FALSE(f.fakes.entries->lastMove.has_value()); // мусор до сервиса не доходит
+
+    f.fakes.entries->moveError =
+        domain::Error{Code::InvalidArgument, "Нельзя переместить объект в самого себя"};
+    auto refused = f.api("POST", "/api/v1/entries/move", R"({"ids":[1],"parentId":1})");
+    CHECK(refused.status == 422);
+    CHECK(refused.errorCode() == "invalid_argument");
+    // и без токена - 401, как у остальных
+    CHECK(f.request("POST", "/api/v1/entries/move", {"Content-Type: application/json"},
+                    R"({"ids":[1],"parentId":null})")
+              .status == 401);
 }
 
 TEST_CASE("search passes the query and returns hits with paths", "[http][search]") {
@@ -459,6 +618,8 @@ TEST_CASE("import streams multipart parts into the import session", "[http][impo
     auto ok = f.request("POST", "/api/v1/import?parentId=1", headers, body);
     REQUIRE(ok.status == 200);
     CHECK(ok.json()["imported"] == 2);
+    CHECK(ok.json()["replaced"] == 0);
+    CHECK(ok.json()["skipped"] == 0);
     CHECK(f.fakes.importExport->importParent == 1);
     const auto& files = f.fakes.importExport->imported;
     REQUIRE(files.size() == 2);

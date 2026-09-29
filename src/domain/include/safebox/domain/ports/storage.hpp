@@ -65,6 +65,9 @@ public:
     [[nodiscard]] virtual Result<EntryId> insert(const EntryRecord& record) = 0;
     [[nodiscard]] virtual Status updateSealed(EntryId id, std::span<const std::byte> encName,
                                               std::span<const std::byte> encMeta) = 0;
+    // Все колонки записи по record.id (перенос, смена блобов); NotFound - нет записи или
+    // нового родителя.
+    [[nodiscard]] virtual Status update(const EntryRecord& record) = 0;
     [[nodiscard]] virtual Result<EntryRecord> get(EntryId id) = 0; // NotFound
     [[nodiscard]] virtual Result<std::vector<EntryRecord>>
     children(std::optional<EntryId> parent) = 0;
@@ -80,6 +83,41 @@ public:
 
     // pending -> ready; блоб должен существовать и быть pending.
     [[nodiscard]] virtual Status promote(BlobId id) = 0;
+    // Блоб и его куски (ready или pending); нет такого - не ошибка. На блоб не должна
+    // ссылаться запись.
+    [[nodiscard]] virtual Status remove(BlobId id) = 0;
+};
+
+// Зашифрованные строки таблиц tag_categories и tags. category_id открыт и входит в AAD имени тега.
+struct TagCategoryRecord {
+    CategoryId id = 0;
+    Bytes encName;
+};
+
+struct TagRecord {
+    TagId id = 0;
+    CategoryId categoryId = 0;
+    Bytes encName;
+};
+
+class TagRepository {
+public:
+    virtual ~TagRepository() = default;
+
+    // Имя вставляется пустым и запечатывается по полученному id (updateCategory/updateTag).
+    [[nodiscard]] virtual Result<CategoryId> insertCategory() = 0;
+    [[nodiscard]] virtual Status updateCategory(CategoryId id,
+                                                std::span<const std::byte> encName) = 0;
+    // Категория и каскадом ее теги; NotFound - нет такой.
+    [[nodiscard]] virtual Status removeCategory(CategoryId id) = 0;
+    [[nodiscard]] virtual Result<std::vector<TagCategoryRecord>> categories() = 0;
+    // NotFound - нет категории.
+    [[nodiscard]] virtual Result<TagId> insertTag(CategoryId category) = 0;
+    // Перенос тега в другую категорию = смена category_id вместе с перезапечатанным именем.
+    [[nodiscard]] virtual Status updateTag(TagId id, CategoryId category,
+                                           std::span<const std::byte> encName) = 0;
+    [[nodiscard]] virtual Status removeTag(TagId id) = 0; // NotFound - нет такого
+    [[nodiscard]] virtual Result<std::vector<TagRecord>> tags() = 0;
 };
 
 class UnitOfWork {
@@ -88,6 +126,7 @@ public:
 
     [[nodiscard]] virtual EntryRepository& entries() = 0;
     [[nodiscard]] virtual BlobRepository& blobs() = 0;
+    [[nodiscard]] virtual TagRepository& tags() = 0;
     [[nodiscard]] virtual Status saveMeta(const SafeMeta& meta) = 0;
     [[nodiscard]] virtual Status commit() = 0;
 };

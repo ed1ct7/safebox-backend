@@ -350,3 +350,124 @@ TEST_CASE("guards hold on a real socket", "[integration][security]") {
     REQUIRE(form);
     CHECK(form->status == 415);
 }
+
+TEST_CASE("organizing over HTTP: description, move with conflicts, attachments, persistence",
+          "[integration][UF]") {
+    test::TempDir dir;
+    const auto png = makePng(64, 48);
+    Stack stack(dir.path());
+    auto c = stack.client();
+
+    const auto session =
+        post(c, "/api/v1/safe/create",
+             {{"path", "Организация"}, {"password", "пароль-1"}, {"confirm", "пароль-1"}}, 201);
+    const auto token = session["token"].get<std::string>();
+    httplib::UploadFormDataItems items = {
+        {"file", png, "снимок.png", "image/png"},
+        {"file", "из Папки", "Папка/заметка.txt", "text/plain"},
+        {"file", "из Другой", "Другая/заметка.txt", "text/plain"},
+        {"file", "из Цели", "Цель/заметка.txt", "text/plain"},
+    };
+    auto imported = c.Post("/api/v1/import", bearer(token), items);
+    REQUIRE(imported);
+    REQUIRE(imported->status == 200);
+    CHECK(Json::parse(imported->body)["imported"] == 4);
+    CHECK(Json::parse(imported->body)["replaced"] == 0);
+
+    const auto idOf = [](const Json& entry) { return entry["id"].get<std::int64_t>(); };
+    const auto listing = [&](std::int64_t parent) {
+        return get(c, "/api/v1/entries?parentId=" + std::to_string(parent), token);
+    };
+    const auto root = get(c, "/api/v1/entries", token);
+    const auto shot = byName(root, "снимок.png");
+    const auto folder = byName(root, "Папка");
+    const auto other = byName(root, "Другая");
+    const auto target = byName(root, "Цель");
+    CHECK(shot["description"] == "");
+    CHECK(shot["childCount"] == 0);
+    CHECK(shot["tags"].empty());
+    CHECK(shot["sourceModifiedAt"].is_null());
+    CHECK(target["childCount"] == 1);
+
+    // описание и имя
+    const auto patch = [&](std::int64_t id, const Json& body, int expected) {
+        auto r = c.Patch("/api/v1/entries/" + std::to_string(id), bearer(token), body.dump(),
+                         "application/json");
+        REQUIRE(r);
+        INFO(r->body);
+        REQUIRE(r->status == expected);
+        return Json::parse(r->body);
+    };
+    CHECK(patch(idOf(shot), {{"description", "закат над морем"}}, 200)["description"] ==
+          "закат над морем");
+    CHECK(patch(idOf(shot), {{"name", "рассвет.png"}}, 200)["name"] == "рассвет.png");
+    CHECK(patch(idOf(shot), {{"name", "a/b"}}, 422)["error"]["code"] == "invalid_argument");
+    CHECK(patch(idOf(shot), {{"url", "https://example.com"}}, 422)["error"]["code"] ==
+          "invalid_argument"); // не ссылка
+    CHECK(patch(idOf(shot), Json::object(), 400)["error"]["code"] == "bad_request");
+
+    // конфликт имен при переносе: план, потом решение
+    const auto noteOfOther = byName(listing(idOf(other)), "заметка.txt");
+    const auto planned =
+        post(c, "/api/v1/entries/move/plan",
+             {{"ids", {idOf(noteOfOther)}}, {"parentId", idOf(target)}}, 200, bearer(token));
+    REQUIRE(planned["conflicts"].size() == 1);
+    CHECK(planned["conflicts"][0]["id"] == idOf(noteOfOther));
+    CHECK(planned["conflicts"][0]["existing"]["name"] == "заметка.txt");
+
+    const auto kept =
+        post(c, "/api/v1/entries/move", {{"ids", {idOf(noteOfOther)}}, {"parentId", idOf(target)}},
+             200, bearer(token));
+    CHECK(kept == Json({{"moved", 1}, {"replaced", 0}, {"skipped", 0}}));
+    CHECK(listing(idOf(target))["entries"].size() == 2);
+    byName(listing(idOf(target)), "заметка (2).txt");
+
+    const auto noteOfFolder = byName(listing(idOf(folder)), "заметка.txt");
+    const auto replaced = post(c, "/api/v1/entries/move",
+                               {{"ids", {idOf(noteOfFolder)}},
+                                {"parentId", idOf(target)},
+                                {"resolutions", {{std::to_string(idOf(noteOfFolder)), "replace"}}}},
+                               200, bearer(token));
+    CHECK(replaced == Json({{"moved", 1}, {"replaced", 1}, {"skipped", 0}}));
+    const auto inTarget = listing(idOf(target));
+    REQUIRE(inTarget["entries"].size() == 2);
+    const auto survivor = byName(inTarget, "заметка.txt");
+    CHECK(idOf(survivor) == idOf(noteOfFolder));
+    auto content =
+        c.Get("/api/v1/media/" + std::to_string(idOf(survivor)) + "/content", bearer(token));
+    REQUIRE(content);
+    CHECK(content->body == "из Папки");
+
+    // вложения: папка внутрь фото; в дереве слева ее уже нет
+    post(c, "/api/v1/entries/move", {{"ids", {idOf(target)}}, {"parentId", idOf(shot)}}, 200,
+         bearer(token));
+    const auto attachments = listing(idOf(shot));
+    CHECK(attachments["parent"]["name"] == "рассвет.png");
+    CHECK(attachments["parent"]["childCount"] == 1);
+    CHECK(attachments["parent"]["description"] == "закат над морем");
+    CHECK(byName(attachments, "Цель")["childCount"] == 2);
+    CHECK(attachments["path"].size() == 1);
+    const auto folders = get(c, "/api/v1/folders", token);
+    std::vector<std::string> tree;
+    for (const auto& node : folders["folders"]) {
+        tree.push_back(node["name"].get<std::string>());
+    }
+    CHECK(tree == std::vector<std::string>{"Другая", "Папка"});
+
+    // фото нельзя перенести в свои вложения
+    const auto refused =
+        post(c, "/api/v1/entries/move", {{"ids", {idOf(shot)}}, {"parentId", idOf(target)}}, 422,
+             bearer(token));
+    CHECK(refused["error"]["code"] == "invalid_argument");
+
+    // блокировка и повторный вход: все на месте
+    post(c, "/api/v1/safe/lock", Json::object(), 204, bearer(token));
+    const auto again = post(c, "/api/v1/safe/unlock",
+                            {{"path", session["safe"]["path"]}, {"password", "пароль-1"}}, 200);
+    const auto token2 = again["token"].get<std::string>();
+    const auto reopened = get(c, "/api/v1/entries?parentId=" + std::to_string(idOf(shot)), token2);
+    CHECK(reopened["parent"]["description"] == "закат над морем");
+    CHECK(byName(reopened, "Цель")["childCount"] == 2);
+    CHECK(get(c, "/api/v1/entries/" + std::to_string(idOf(survivor)), token2)["name"] ==
+          "заметка.txt");
+}

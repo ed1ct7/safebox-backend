@@ -1,4 +1,5 @@
-// Правила домена: проверка паролей и имен, тип файла по сигнатуре, разбор .url ярлыков
+// Правила домена: проверка паролей, имен и тегов, тип файла по сигнатуре, разбор .url ярлыков,
+// адреса ссылок
 #pragma once
 
 #include <algorithm>
@@ -22,6 +23,9 @@ inline constexpr std::size_t kMinPasswordLength = 6;
 inline constexpr std::size_t kMaxPasswordBytes = 1024;
 inline constexpr std::size_t kMaxNameBytes = 255;
 inline constexpr std::size_t kMaxUrlBytes = 8192;
+inline constexpr std::size_t kMaxTagNameChars = 100;
+inline constexpr std::size_t kMaxDescriptionBytes = 64 * 1024;
+inline constexpr std::size_t kMaxTagsPerEntry = 1000;
 // Сколько первых байтов нужно detectKind (сигнатуры + ярлык .url).
 inline constexpr std::size_t kSniffBytes = 64 * 1024;
 
@@ -215,6 +219,32 @@ namespace detail {
     return {};
 }
 
+// Название категории или тега: пробелы по краям срезаются, результат - очищенное имя.
+// ":" запрещен - по нему фронтенд разделяет "категория:тег".
+[[nodiscard]] inline Result<std::string> validateTagName(std::string_view name) {
+    const auto clean = detail::trim(name);
+    if (clean.empty()) {
+        return fail(Error::Code::InvalidArgument, "Название не может быть пустым");
+    }
+    if (!isValidUtf8(clean)) {
+        return fail(Error::Code::InvalidArgument, "Название содержит некорректные символы");
+    }
+    if (utf8Length(clean) > kMaxTagNameChars) {
+        return fail(Error::Code::InvalidArgument, "Название длиннее 100 символов");
+    }
+    for (std::size_t i = 0; i < clean.size(); ++i) {
+        const auto u = static_cast<unsigned char>(clean[i]);
+        const bool c1 = u == 0xC2 && i + 1 < clean.size() &&
+                        static_cast<unsigned char>(clean[i + 1]) >= 0x80 &&
+                        static_cast<unsigned char>(clean[i + 1]) <= 0x9F;
+        if (u < 0x20 || u == 0x7F || clean[i] == ':' || c1) {
+            return fail(Error::Code::InvalidArgument,
+                        "Название не может содержать двоеточие и управляющие символы");
+        }
+    }
+    return std::string(clean);
+}
+
 // Имя из импорта: запрещенные символы и битый UTF-8 -> '_', пробелы по краям
 // срезаются, длина режется по границе символа. Результат всегда проходит
 // validateName.
@@ -254,6 +284,28 @@ struct DetectedKind {
     std::string_view mime = "application/octet-stream";
 };
 
+// Адрес ссылки: http/https, без пробелов и управляющих символов, с хостом.
+[[nodiscard]] inline bool isHttpUrl(std::string_view url) {
+    if (url.empty() || url.size() > kMaxUrlBytes || !isValidUtf8(url)) {
+        return false;
+    }
+    for (const char c : url) {
+        const auto u = static_cast<unsigned char>(c);
+        if (u < 0x20 || u == 0x7F || c == ' ') {
+            return false;
+        }
+    }
+    std::string_view rest;
+    if (detail::istartsWith(url, "http://")) {
+        rest = url.substr(7);
+    } else if (detail::istartsWith(url, "https://")) {
+        rest = url.substr(8);
+    } else {
+        return false;
+    }
+    return !rest.empty() && rest.front() != '/' && rest.front() != '?' && rest.front() != '#';
+}
+
 // URL из ярлыка Windows (.url): секция [InternetShortcut], строка URL=...
 // Только http/https - иначе это не ссылка (javascript:, file: и т.п.).
 [[nodiscard]] inline std::optional<std::string> shortcutUrl(std::span<const std::byte> content) {
@@ -277,16 +329,7 @@ struct DetectedKind {
             continue;
         }
         const auto url = detail::trim(line.substr(4));
-        if (url.empty() || url.size() > kMaxUrlBytes || !isValidUtf8(url)) {
-            return std::nullopt;
-        }
-        for (const char c : url) {
-            const auto u = static_cast<unsigned char>(c);
-            if (u < 0x20 || u == 0x7F || c == ' ') {
-                return std::nullopt;
-            }
-        }
-        if (!detail::istartsWith(url, "http://") && !detail::istartsWith(url, "https://")) {
+        if (!isHttpUrl(url)) {
             return std::nullopt;
         }
         return std::string(url);
@@ -315,6 +358,78 @@ struct DetectedKind {
         c = detail::asciiLower(c);
     }
     return host;
+}
+
+// Вид адреса для сравнения ссылок на дубли: схема и хост в нижнем регистре, порт по
+// умолчанию, завершающий "/" пути и utm_-параметры убраны, остальное как есть. nullopt - не
+// http(s).
+[[nodiscard]] inline std::optional<std::string> normalizeUrl(std::string_view url) {
+    if (!isHttpUrl(url)) {
+        return std::nullopt;
+    }
+    const auto schemeEnd = url.find("://");
+    std::string scheme(url.substr(0, schemeEnd));
+    for (auto& c : scheme) {
+        c = detail::asciiLower(c);
+    }
+    auto rest = url.substr(schemeEnd + 3);
+
+    std::string_view fragment;
+    if (const auto hash = rest.find('#'); hash != std::string_view::npos) {
+        fragment = rest.substr(hash);
+        rest = rest.substr(0, hash);
+    }
+    std::string_view query;
+    if (const auto mark = rest.find('?'); mark != std::string_view::npos) {
+        query = rest.substr(mark + 1);
+        rest = rest.substr(0, mark);
+    }
+    auto hostPort = rest.substr(0, rest.find('/'));
+    auto path = rest.substr(hostPort.size());
+    std::string_view userinfo;
+    if (const auto at = hostPort.rfind('@'); at != std::string_view::npos) {
+        userinfo = hostPort.substr(0, at + 1);
+        hostPort = hostPort.substr(at + 1);
+    }
+    std::string_view host = hostPort;
+    std::string_view port;
+    const auto colon =
+        hostPort.starts_with('[') ? hostPort.find(':', hostPort.find(']')) : hostPort.find(':');
+    if (colon != std::string_view::npos) {
+        host = hostPort.substr(0, colon);
+        port = hostPort.substr(colon + 1);
+    }
+    if (port == (scheme == "https" ? "443" : "80")) {
+        port = {};
+    }
+    if (path.ends_with('/')) {
+        path.remove_suffix(1);
+    }
+
+    std::string out = scheme + "://";
+    out.append(userinfo);
+    for (const char c : host) {
+        out.push_back(detail::asciiLower(c));
+    }
+    if (!port.empty()) {
+        out.push_back(':');
+        out.append(port);
+    }
+    out.append(path);
+    std::string kept;
+    while (!query.empty()) {
+        const auto amp = query.find('&');
+        const auto param = query.substr(0, amp);
+        query = amp == std::string_view::npos ? std::string_view{} : query.substr(amp + 1);
+        if (!detail::istartsWith(param, "utm_")) {
+            kept.append(kept.empty() ? "" : "&").append(param);
+        }
+    }
+    if (!kept.empty()) {
+        out.append("?").append(kept);
+    }
+    out.append(fragment);
+    return out;
 }
 
 [[nodiscard]] inline DetectedKind detectKind(std::span<const std::byte> head,

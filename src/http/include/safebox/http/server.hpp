@@ -37,7 +37,7 @@ struct HttpConfig {
     std::vector<std::string> extraHosts;
     // Дополнительные Origin для изменяющих запросов (dev: "http://localhost:5173").
     std::vector<std::string> extraOrigins;
-    std::size_t maxJsonBody = 64 * 1024;
+    std::size_t maxJsonBody = 256 * 1024;      // описание записи до 64 КиБ + запас на экранирование
     std::string version = "dev";               // отдается в GET /health
     std::function<void(std::string_view)> log; // журнал запросов; пусто - молчать
 };

@@ -16,7 +16,7 @@ TEST_CASE("list sorts folders first and builds breadcrumbs", "[entries][UF-3]") 
 
     auto root = f.services.entries->list(f.lease(s), std::nullopt);
     REQUIRE(root.has_value());
-    CHECK_FALSE(root->folder.has_value());
+    CHECK_FALSE(root->parent.has_value());
     std::vector<std::string> names;
     for (const auto& e : root->entries) {
         names.push_back(e.name);
@@ -27,15 +27,16 @@ TEST_CASE("list sorts folders first and builds breadcrumbs", "[entries][UF-3]") 
     const auto beta = f.entryNamed(s, "Beta", alpha.id);
     auto deep = f.services.entries->list(f.lease(s), beta.id);
     REQUIRE(deep.has_value());
-    REQUIRE(deep->folder.has_value());
-    CHECK(deep->folder->name == "Beta");
+    REQUIRE(deep->parent.has_value());
+    CHECK(deep->parent->name == "Beta");
     REQUIRE(deep->path.size() == 2);
     CHECK(deep->path[0].name == "alpha");
     CHECK(deep->path[1].name == "Beta");
 
-    auto notFolder = f.services.entries->list(f.lease(s), f.entryNamed(s, "b.txt").id);
-    REQUIRE_FALSE(notFolder.has_value());
-    CHECK(notFolder.error().code == Code::InvalidArgument);
+    auto ofFile = f.services.entries->list(f.lease(s), f.entryNamed(s, "b.txt").id);
+    REQUIRE(ofFile.has_value()); // родитель - любая запись, у файла просто нет вложений
+    CHECK(ofFile->parent->name == "b.txt");
+    CHECK(ofFile->entries.empty());
     auto missing = f.services.entries->list(f.lease(s), domain::EntryId{12345});
     REQUIRE_FALSE(missing.has_value());
     CHECK(missing.error().code == Code::NotFound);
@@ -50,25 +51,25 @@ TEST_CASE("list sorts folders first and builds breadcrumbs", "[entries][UF-3]") 
           std::vector<std::string>{"alpha", "Beta", "Zeta"}); // родители раньше детей
 }
 
-TEST_CASE("rename re-seals the name and survives lock/unlock", "[entries][UF-10]") {
+TEST_CASE("update re-seals the name and survives lock/unlock", "[entries][UF-10]") {
     AppFixture f;
     auto s = f.createSafe();
     REQUIRE(f.importFiles(s, {{"old.txt", "data"}}).imported == 1);
     const auto entry = f.entryNamed(s, "old.txt");
 
-    auto renamed = f.services.entries->rename(f.lease(s), entry.id, "  Новое имя.txt ");
+    auto renamed = f.services.entries->update(f.lease(s), entry.id, {.name = "  Новое имя.txt "});
     REQUIRE(renamed.has_value());
     CHECK(renamed->name == "Новое имя.txt");
     CHECK(renamed->meta.blobId == entry.meta.blobId);
     CHECK(f.entryNamed(s, "Новое имя.txt").id == entry.id);
 
-    auto bad = f.services.entries->rename(f.lease(s), entry.id, "a/b");
+    auto bad = f.services.entries->update(f.lease(s), entry.id, {.name = "a/b"});
     REQUIRE_FALSE(bad.has_value());
     CHECK(bad.error().code == Code::InvalidArgument);
-    auto empty = f.services.entries->rename(f.lease(s), entry.id, "   ");
+    auto empty = f.services.entries->update(f.lease(s), entry.id, {.name = "   "});
     REQUIRE_FALSE(empty.has_value());
     CHECK(empty.error().code == Code::InvalidArgument);
-    auto missing = f.services.entries->rename(f.lease(s), 999, "x.txt");
+    auto missing = f.services.entries->update(f.lease(s), 999, {.name = "x.txt"});
     REQUIRE_FALSE(missing.has_value());
     CHECK(missing.error().code == Code::NotFound);
 
@@ -157,7 +158,8 @@ TEST_CASE("search finds names anywhere, case-insensitively", "[search][UF-8]") {
     auto fresh = f.services.search->search(f.lease(s), "new", 0);
     REQUIRE(fresh.has_value());
     CHECK(fresh->size() == 1);
-    REQUIRE(f.services.entries->rename(f.lease(s), f.entryNamed(s, "new.txt").id, "renamed.txt")
+    REQUIRE(f.services.entries
+                ->update(f.lease(s), f.entryNamed(s, "new.txt").id, {.name = "renamed.txt"})
                 .has_value());
     auto stale = f.services.search->search(f.lease(s), "new", 0);
     REQUIRE(stale.has_value());

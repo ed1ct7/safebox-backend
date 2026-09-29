@@ -14,6 +14,8 @@ namespace safebox::http {
 [[nodiscard]] Json toJson(const std::vector<domain::PathItem>& path);
 [[nodiscard]] Json toJson(const app::FolderListing& listing);
 [[nodiscard]] Json toJson(const app::FolderNode& node);
+[[nodiscard]] Json toJson(const app::MoveConflict& conflict);
+[[nodiscard]] Json toJson(const app::MoveResult& result);
 [[nodiscard]] Json toJson(const app::SafeInfo& info);
 [[nodiscard]] Json toJson(const app::PublicStatus& status);
 [[nodiscard]] Json toJson(const domain::SearchHit& hit);

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace safebox::app {
@@ -34,6 +35,10 @@ public:
 
     [[nodiscard]] bool cancelled() const noexcept;
     [[nodiscard]] VaultSession* session() const noexcept { return session_.get(); }
+    // Еще одна аренда той же сессии; nullopt - сессия уже закрывается.
+    [[nodiscard]] std::optional<Lease> share() const;
+    // Сессия без удержания аренды - для фоновой работы, которая не должна мешать lock().
+    [[nodiscard]] std::weak_ptr<VaultSession> weakSession() const noexcept { return session_; }
 
 private:
     void release() noexcept;

@@ -24,6 +24,8 @@ int statusFor(Code code) noexcept {
     case Code::IntegrityError:
     case Code::Internal:
         return 500;
+    case Code::PreviewFailed:
+        return 502;
     }
     return 500;
 }
@@ -47,6 +49,8 @@ std::string_view wireCodeFor(Code code) noexcept {
         return "io_error";
     case Code::IntegrityError:
         return "integrity_error";
+    case Code::PreviewFailed:
+        return "preview_failed";
     case Code::Internal:
         return "internal";
     }

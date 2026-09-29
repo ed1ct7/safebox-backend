@@ -107,21 +107,26 @@ public:
         entries[3] = makeEntry(3, std::nullopt, domain::Kind::Link, "site.url");
         entries[3].meta.url = "https://Example.com:8443/page";
         entries[4] = makeEntry(4, std::nullopt, domain::Kind::File, "<script>.html");
+        entries[2].meta.description = "закат на пляже";
+        entries[2].meta.sourceModifiedAt = 1'700'000'000'000;
+        entries[2].meta.tags = {{7, true}, {9, false}};
+        entries[2].inheritedTags = {{5, 1}};
+        entries[1].childCount = 1;
     }
 
     app::Result<app::FolderListing> list(const app::Lease&,
-                                         std::optional<domain::EntryId> folder) override {
+                                         std::optional<domain::EntryId> parent) override {
         app::FolderListing out;
-        if (folder) {
-            auto it = entries.find(*folder);
+        if (parent) {
+            auto it = entries.find(*parent);
             if (it == entries.end()) {
-                return domain::fail(domain::Error::Code::NotFound, "Папка не найдена");
+                return domain::fail(domain::Error::Code::NotFound, "Объект не найден");
             }
-            out.folder = it->second;
+            out.parent = it->second;
             out.path = {{it->second.id, it->second.name}};
         }
         for (const auto& [id, e] : entries) {
-            if (e.parentId == folder) {
+            if (e.parentId == parent) {
                 out.entries.push_back(e);
             }
         }
@@ -143,14 +148,45 @@ public:
         return std::vector<app::FolderNode>{{1, std::nullopt, "Отпуск"}};
     }
 
-    app::Result<domain::Entry> rename(const app::Lease&, domain::EntryId id,
-                                      std::string_view name) override {
+    app::Result<domain::Entry> update(const app::Lease&, domain::EntryId id,
+                                      const app::UpdateEntryCmd& cmd) override {
+        if (updateError) {
+            return std::unexpected(*updateError);
+        }
         auto it = entries.find(id);
         if (it == entries.end()) {
             return domain::fail(domain::Error::Code::NotFound, "Объект не найден");
         }
-        it->second.name = std::string(name);
+        lastUpdate = cmd;
+        if (cmd.name) {
+            it->second.name = *cmd.name;
+        }
+        if (cmd.description) {
+            it->second.meta.description = *cmd.description;
+        }
+        if (cmd.url) {
+            it->second.meta.url = *cmd.url;
+        }
         return it->second;
+    }
+
+    app::Result<std::vector<app::MoveConflict>>
+    planMove(const app::Lease&, std::span<const domain::EntryId> ids,
+             std::optional<domain::EntryId> parent) override {
+        if (moveError) {
+            return std::unexpected(*moveError);
+        }
+        lastPlanIds.assign(ids.begin(), ids.end());
+        lastPlanParent = parent;
+        return conflicts;
+    }
+
+    app::Result<app::MoveResult> move(const app::Lease&, const app::MoveCmd& cmd) override {
+        if (moveError) {
+            return std::unexpected(*moveError);
+        }
+        lastMove = cmd;
+        return moveResult;
     }
 
     app::Result<std::size_t> remove(const app::Lease&,
@@ -161,7 +197,15 @@ public:
 
     std::map<domain::EntryId, domain::Entry> entries;
     std::optional<domain::Error> getError;
+    std::optional<domain::Error> updateError;
+    std::optional<domain::Error> moveError;
     std::vector<domain::EntryId> removed;
+    std::optional<app::UpdateEntryCmd> lastUpdate;
+    std::vector<domain::EntryId> lastPlanIds;
+    std::optional<domain::EntryId> lastPlanParent;
+    std::optional<app::MoveCmd> lastMove;
+    std::vector<app::MoveConflict> conflicts;
+    app::MoveResult moveResult{1, 0, 0};
 };
 
 class MemoryContentStream final : public app::ContentStream {
@@ -244,9 +288,11 @@ public:
         domain::SearchHit hit;
         hit.entry = makeEntry(2, 1, domain::Kind::Photo, "море.jpg");
         hit.path = {{1, "Отпуск"}};
+        hit.matchedIn = matchedIn;
         return std::vector<domain::SearchHit>{hit};
     }
 
+    domain::MatchedIn matchedIn = domain::MatchedIn::None;
     std::string lastQuery;
     std::size_t lastLimit = 0;
 };

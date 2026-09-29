@@ -11,6 +11,8 @@ namespace safebox::domain {
 
 using EntryId = std::int64_t;
 using BlobId = std::int64_t;
+using TagId = std::int64_t;
+using CategoryId = std::int64_t;
 
 // Значения - часть формата файла (лежат в enc_meta), менять нельзя.
 enum class Kind : std::uint8_t {
@@ -19,6 +21,13 @@ enum class Kind : std::uint8_t {
     Photo = 2,
     Video = 3,
     Link = 4,
+};
+
+struct TagAssignment {
+    TagId tagId = 0;
+    bool inherit = false; // действует на всё поддерево записи
+
+    friend bool operator==(const TagAssignment&, const TagAssignment&) = default;
 };
 
 struct EntryMeta {
@@ -30,6 +39,30 @@ struct EntryMeta {
     std::int64_t modifiedAt = 0;  // unix-время, мс (импорт/переименование)
     std::optional<BlobId> blobId; // копия открытой колонки entries.blob_id
     std::optional<BlobId> thumbBlobId; // копия открытой колонки entries.thumb_blob_id
+    std::optional<std::int64_t> sourceModifiedAt; // unix-мс изменения исходного файла на диске
+    std::string description;
+    bool nameByUser = false; // имя задано пользователем - предпросмотр его не трогает
+    bool descriptionByUser = false;
+    std::vector<TagAssignment> tags; // прямые присвоения, по возрастанию tagId, без дублей
+};
+
+struct TagCategory {
+    CategoryId id = 0;
+    std::string name;
+};
+
+struct Tag {
+    TagId id = 0;
+    CategoryId categoryId = 0;
+    std::string name;
+};
+
+// Тег, действующий на запись через предка с inherit.
+struct InheritedTag {
+    TagId tagId = 0;
+    EntryId fromId = 0; // предок, у которого он задан
+
+    friend bool operator==(const InheritedTag&, const InheritedTag&) = default;
 };
 
 struct Entry {
@@ -37,6 +70,9 @@ struct Entry {
     std::optional<EntryId> parentId; // nullopt - корень ("Все объекты")
     std::string name;
     EntryMeta meta;
+    // Считает каталог, в файле не лежит.
+    std::size_t childCount = 0;              // прямых детей
+    std::vector<InheritedTag> inheritedTags; // от предков с inherit, по возрастанию tagId
 
     [[nodiscard]] bool isFolder() const noexcept { return meta.kind == Kind::Folder; }
     [[nodiscard]] bool hasThumbnail() const noexcept { return meta.thumbBlobId.has_value(); }
@@ -47,9 +83,16 @@ struct PathItem {
     std::string name;
 };
 
+enum class MatchedIn : std::uint8_t {
+    None, // поиска по тексту не было (только теги)
+    Name,
+    Description,
+};
+
 struct SearchHit {
     Entry entry;
     std::vector<PathItem> path; // папки от корня до родителя записи
+    MatchedIn matchedIn = MatchedIn::None;
 };
 
 struct ImportFailure {
@@ -59,8 +102,9 @@ struct ImportFailure {
 
 struct ImportResult {
     std::size_t imported = 0;
-    std::size_t failed = 0;
+    std::size_t replaced = 0;
     std::size_t skipped = 0; // уже были в папке: то же имя без учета регистра и те же байты
+    std::size_t failed = 0;
     std::vector<ImportFailure> failures;
 };
 

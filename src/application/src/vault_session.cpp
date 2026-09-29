@@ -91,29 +91,81 @@ std::string foldForSearch(std::string_view text) {
     return out;
 }
 
+std::string uniqueName(std::string_view name, bool isFolder,
+                       const std::unordered_set<std::string>& taken) {
+    if (!taken.contains(foldForSearch(name))) {
+        return std::string(name);
+    }
+    const auto dot = isFolder ? std::string_view::npos : name.rfind('.');
+    const bool hasExt = dot != std::string_view::npos && dot > 0;
+    const auto stem = hasExt ? name.substr(0, dot) : name;
+    const auto ext = hasExt ? name.substr(dot) : std::string_view{};
+    for (int n = 2;; ++n) {
+        const auto suffix = " (" + std::to_string(n) + ")";
+        // имя остается в пределах kMaxNameBytes: лишнее срезается с основы по границе символа
+        const auto fixed = suffix.size() + ext.size();
+        auto keep = stem;
+        if (fixed < domain::kMaxNameBytes && keep.size() > domain::kMaxNameBytes - fixed) {
+            auto cut = domain::kMaxNameBytes - fixed;
+            while (cut > 0 && (static_cast<unsigned char>(keep[cut]) & 0xC0) == 0x80) {
+                --cut;
+            }
+            keep = keep.substr(0, cut);
+        }
+        auto candidate = std::string(keep).append(suffix).append(ext);
+        if (!taken.contains(foldForSearch(candidate))) {
+            return candidate;
+        }
+    }
+}
+
 // Catalog
 
 Catalog::~Catalog() {
     for (auto& [id, node] : nodes_) {
         domain::secureWipe(node.entry.name);
         domain::secureWipe(node.folded);
+        domain::secureWipe(node.foldedDescription);
         domain::secureWipe(node.entry.meta.url);
+        domain::secureWipe(node.entry.meta.description);
+    }
+    for (auto& [id, node] : categories_) {
+        domain::secureWipe(node.category.name);
+        domain::secureWipe(node.folded);
+    }
+    for (auto& [id, node] : tags_) {
+        domain::secureWipe(node.tag.name);
+        domain::secureWipe(node.folded);
     }
 }
 
 void Catalog::add(domain::Entry entry) {
     auto folded = foldForSearch(entry.name);
+    auto foldedDescription = foldForSearch(entry.meta.description);
     const auto id = entry.id;
-    nodes_.insert_or_assign(id, Node{std::move(entry), std::move(folded)});
+    nodes_.insert_or_assign(
+        id, Node{std::move(entry), std::move(folded), std::move(foldedDescription), 0});
+}
+
+void Catalog::addCategory(domain::TagCategory category) {
+    auto folded = foldForSearch(category.name);
+    const auto id = category.id;
+    categories_.insert_or_assign(id, CategoryNode{std::move(category), std::move(folded)});
+}
+
+void Catalog::addTag(domain::Tag tag) {
+    auto folded = foldForSearch(tag.name);
+    const auto id = tag.id;
+    tags_.insert_or_assign(id, TagNode{std::move(tag), std::move(folded)});
 }
 
 void Catalog::finalize() {
     children_.clear();
     roots_.clear();
-    for (const auto& [id, node] : nodes_) {
+    for (auto& [id, node] : nodes_) {
+        node.childCount = 0;
         const auto& parent = node.entry.parentId;
-        const Node* p = parent ? find(*parent) : nullptr;
-        if (p != nullptr && p->entry.isFolder() && *parent != id) {
+        if (parent && *parent != id && nodes_.contains(*parent)) {
             children_[*parent].push_back(id);
         } else {
             roots_.push_back(id);
@@ -151,6 +203,7 @@ void Catalog::finalize() {
     std::sort(roots_.begin(), roots_.end(), less);
     for (auto& [parent, list] : children_) {
         std::sort(list.begin(), list.end(), less);
+        nodes_.at(parent).childCount = list.size();
     }
 }
 
@@ -166,6 +219,85 @@ const std::vector<EntryId>& Catalog::childrenOf(std::optional<EntryId> parent) c
     }
     const auto it = children_.find(*parent);
     return it == children_.end() ? empty : it->second;
+}
+
+std::vector<domain::InheritedTag> Catalog::inheritedTags(EntryId id) const {
+    std::vector<domain::InheritedTag> out;
+    const Node* self = find(id);
+    if (self == nullptr) {
+        return out;
+    }
+    std::unordered_set<domain::TagId> known; // прямые и уже найденные у более близких предков
+    for (const auto& tag : self->entry.meta.tags) {
+        known.insert(tag.tagId);
+    }
+    std::unordered_set<EntryId> seen{id};
+    std::optional<EntryId> current = self->entry.parentId;
+    while (current && seen.insert(*current).second) {
+        const Node* node = find(*current);
+        if (node == nullptr) {
+            break;
+        }
+        for (const auto& tag : node->entry.meta.tags) {
+            if (tag.inherit && known.insert(tag.tagId).second) {
+                out.push_back({tag.tagId, node->entry.id});
+            }
+        }
+        current = node->entry.parentId;
+    }
+    std::sort(out.begin(), out.end(),
+              [](const auto& a, const auto& b) { return a.tagId < b.tagId; });
+    return out;
+}
+
+std::vector<domain::TagId> Catalog::effectiveTags(EntryId id) const {
+    std::vector<domain::TagId> out;
+    const Node* self = find(id);
+    if (self == nullptr) {
+        return out;
+    }
+    for (const auto& tag : self->entry.meta.tags) {
+        out.push_back(tag.tagId);
+    }
+    for (const auto& inherited : inheritedTags(id)) {
+        out.push_back(inherited.tagId);
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+bool Catalog::isAncestorOrSelf(EntryId ancestor, EntryId id) const {
+    std::unordered_set<EntryId> seen;
+    std::optional<EntryId> current = id;
+    while (current && seen.insert(*current).second) {
+        if (*current == ancestor) {
+            return true;
+        }
+        const Node* node = find(*current);
+        if (node == nullptr) {
+            break;
+        }
+        current = node->entry.parentId;
+    }
+    return false;
+}
+
+domain::Entry Catalog::describe(const Node& node) const {
+    auto entry = node.entry;
+    entry.childCount = node.childCount;
+    entry.inheritedTags = inheritedTags(entry.id);
+    return entry;
+}
+
+const Catalog::CategoryNode* Catalog::findCategory(domain::CategoryId id) const {
+    const auto it = categories_.find(id);
+    return it == categories_.end() ? nullptr : &it->second;
+}
+
+const Catalog::TagNode* Catalog::findTag(domain::TagId id) const {
+    const auto it = tags_.find(id);
+    return it == tags_.end() ? nullptr : &it->second;
 }
 
 std::vector<domain::PathItem> Catalog::pathTo(EntryId id) const {
@@ -360,6 +492,16 @@ bool Lease::cancelled() const noexcept {
     return session_ && session_->cancelled();
 }
 
+std::optional<Lease> Lease::share() const {
+    if (!session_) {
+        return Lease(nullptr); // пустая аренда (тесты транспорта)
+    }
+    if (!session_->tryAcquire()) {
+        return std::nullopt;
+    }
+    return Lease(session_);
+}
+
 // помощники сервисов
 
 Result<OperationContext> contextOf(const Lease& lease) {
@@ -379,6 +521,8 @@ Result<OperationContext> contextOf(const Lease& lease) {
 
 Result<VaultSession::CatalogPtr> loadCatalog(domain::VaultStore& store, const Sealer& sealer) {
     std::vector<domain::EntryRecord> rows;
+    std::vector<domain::TagCategoryRecord> categoryRows;
+    std::vector<domain::TagRecord> tagRows;
     {
         auto uow = store.begin();
         if (!uow) {
@@ -388,7 +532,17 @@ Result<VaultSession::CatalogPtr> loadCatalog(domain::VaultStore& store, const Se
         if (!all) {
             return std::unexpected(all.error());
         }
+        auto categories = (*uow)->tags().categories();
+        if (!categories) {
+            return std::unexpected(categories.error());
+        }
+        auto tags = (*uow)->tags().tags();
+        if (!tags) {
+            return std::unexpected(tags.error());
+        }
         rows = std::move(*all);
+        categoryRows = std::move(*categories);
+        tagRows = std::move(*tags);
     } // только чтение: откат, мьютекс хранилища свободен до расшифровки
     auto catalog = std::make_shared<Catalog>();
     for (const auto& row : rows) {
@@ -397,6 +551,20 @@ Result<VaultSession::CatalogPtr> loadCatalog(domain::VaultStore& store, const Se
             return std::unexpected(entry.error());
         }
         catalog->add(std::move(*entry));
+    }
+    for (const auto& row : categoryRows) {
+        auto category = sealer.openCategory(row);
+        if (!category) {
+            return std::unexpected(category.error());
+        }
+        catalog->addCategory(std::move(*category));
+    }
+    for (const auto& row : tagRows) {
+        auto tag = sealer.openTag(row);
+        if (!tag) {
+            return std::unexpected(tag.error());
+        }
+        catalog->addTag(std::move(*tag));
     }
     catalog->finalize();
     return VaultSession::CatalogPtr(std::move(catalog));

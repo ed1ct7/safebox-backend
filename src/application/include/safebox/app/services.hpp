@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "safebox/app/session.hpp"
@@ -79,8 +80,8 @@ public:
 // EntriesService
 
 struct FolderListing {
-    std::optional<domain::Entry> folder; // nullopt - корень "Все объекты"
-    std::vector<domain::PathItem> path;  // крошки от корня до папки включительно
+    std::optional<domain::Entry> parent; // nullopt - корень "Все объекты"; иначе любая запись
+    std::vector<domain::PathItem> path;  // крошки от корня до parent включительно
     std::vector<domain::Entry> entries;  // папки первыми, затем по имени
 };
 
@@ -90,17 +91,59 @@ struct FolderNode {
     std::string name;
 };
 
+// Что изменить у записи; заданное поле подменяется целиком.
+struct UpdateEntryCmd {
+    std::optional<std::string> name;        // ставит nameByUser
+    std::optional<std::string> description; // <= 64 КиБ, ставит descriptionByUser
+    std::optional<std::string> url;         // только у ссылки, http/https
+};
+
+enum class ConflictPolicy {
+    KeepBoth,
+    Replace,
+    Skip,
+};
+
+// У нового родителя уже есть запись с тем же именем (без учета регистра).
+struct MoveConflict {
+    domain::EntryId id = 0; // перемещаемая запись
+    domain::Entry existing; // запись, занявшая имя
+};
+
+struct MoveCmd {
+    std::vector<domain::EntryId> ids;
+    std::optional<domain::EntryId> parent;                           // nullopt - корень
+    std::unordered_map<domain::EntryId, ConflictPolicy> resolutions; // по умолчанию KeepBoth
+};
+
+// moved - записи, сменившие родителя (вместе с заменившими и переименованными), replaced -
+// удаленные ими записи, skipped - оставленные на месте по Skip. Запись, уже лежащая у
+// нужного родителя, нигде не учитывается.
+struct MoveResult {
+    std::size_t moved = 0;
+    std::size_t replaced = 0;
+    std::size_t skipped = 0;
+};
+
 class EntriesService {
 public:
     virtual ~EntriesService() = default;
 
+    // parent - любая запись (у файла бывают вложения); нет такой -> NotFound.
     [[nodiscard]] virtual Result<FolderListing> list(const Lease& lease,
-                                                     std::optional<domain::EntryId> folder) = 0;
+                                                     std::optional<domain::EntryId> parent) = 0;
     [[nodiscard]] virtual Result<domain::Entry> get(const Lease& lease, domain::EntryId id) = 0;
-    // Все папки сейфа: родители раньше детей, соседи по имени (дерево слева).
+    // Папки, у которых все предки тоже папки: родители раньше детей, соседи по имени (дерево
+    // слева).
     [[nodiscard]] virtual Result<std::vector<FolderNode>> folders(const Lease& lease) = 0;
-    [[nodiscard]] virtual Result<domain::Entry> rename(const Lease& lease, domain::EntryId id,
-                                                       std::string_view name) = 0;
+    [[nodiscard]] virtual Result<domain::Entry> update(const Lease& lease, domain::EntryId id,
+                                                       const UpdateEntryCmd& cmd) = 0;
+    // Конфликты имен, которые возникнут при переносе ids к parent; ничего не меняет.
+    [[nodiscard]] virtual Result<std::vector<MoveConflict>>
+    planMove(const Lease& lease, std::span<const domain::EntryId> ids,
+             std::optional<domain::EntryId> parent) = 0;
+    // Перенос одной транзакцией; в себя или своего потомка нельзя (ничего не меняется).
+    [[nodiscard]] virtual Result<MoveResult> move(const Lease& lease, const MoveCmd& cmd) = 0;
     // Записи вместе с поддеревьями одной транзакцией; -> сколько удалено всего.
     [[nodiscard]] virtual Result<std::size_t> remove(const Lease& lease,
                                                      std::span<const domain::EntryId> ids) = 0;

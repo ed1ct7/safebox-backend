@@ -55,7 +55,7 @@ public:
         hits.reserve(matches.size());
         for (const auto* node : matches) {
             domain::SearchHit hit;
-            hit.entry = node->entry;
+            hit.entry = cat.describe(*node);
             if (node->entry.parentId) {
                 hit.path = cat.pathTo(*node->entry.parentId);
             }

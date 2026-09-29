@@ -1,4 +1,4 @@
-// Шифрование полей записи и кусков.
+// Шифрование полей записи, имен категорий и тегов, кусков.
 // Sealer после создания не меняется, так что его можно шарить между потоками
 #pragma once
 
@@ -37,6 +37,15 @@ public:
                                                          const domain::EntryMeta& meta) const;
     // Имя + мета + сверки (blob_id, thumb_blob_id, is_folder) -> Entry.
     [[nodiscard]] domain::Result<domain::Entry> openEntry(const domain::EntryRecord& record) const;
+
+    [[nodiscard]] domain::Result<domain::Bytes> sealCategoryName(domain::CategoryId id,
+                                                                 std::string_view name) const;
+    [[nodiscard]] domain::Result<domain::TagCategory>
+    openCategory(const domain::TagCategoryRecord& record) const;
+    // category_id входит в AAD: перенос тега в другую категорию = перезапечатать имя.
+    [[nodiscard]] domain::Result<domain::Bytes>
+    sealTagName(domain::TagId id, domain::CategoryId category, std::string_view name) const;
+    [[nodiscard]] domain::Result<domain::Tag> openTag(const domain::TagRecord& record) const;
 
     [[nodiscard]] domain::Result<domain::Bytes> sealChunk(domain::KeyPurpose purpose,
                                                           domain::BlobId blob, std::uint32_t index,

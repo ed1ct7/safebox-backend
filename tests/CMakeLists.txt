@@ -29,6 +29,10 @@ sbx_add_test_executable(safebox-app-tests
     application/idle_policy_test.cpp
     application/import_export_test.cpp
     application/entries_search_test.cpp
+    application/entries_move_test.cpp
+    application/format_test.cpp
+    application/catalog_test.cpp
+    application/rules_test.cpp
 )
 target_include_directories(safebox-app-tests PRIVATE
     "${PROJECT_SOURCE_DIR}/src/application/src" # white-box: IdlePolicy
@@ -62,6 +66,9 @@ sbx_add_test_executable(safebox-infra-tests
     infra/media_zip_test.cpp
 )
 target_include_directories(safebox-infra-tests SYSTEM PRIVATE "${Stb_INCLUDE_DIR}")
+target_include_directories(safebox-infra-tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/fakes" # store_contract.hpp: общие проверки хранилища
+)
 target_link_libraries(safebox-infra-tests PRIVATE
     safebox-infra
     miniz::miniz # сторонний zip-ридер для проверки StreamZipWriter
