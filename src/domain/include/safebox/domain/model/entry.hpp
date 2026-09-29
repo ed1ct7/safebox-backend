@@ -102,8 +102,8 @@ struct ImportFailure {
 
 struct ImportResult {
     std::size_t imported = 0;
-    std::size_t replaced = 0;
-    std::size_t skipped = 0; // уже были в папке: то же имя без учета регистра и те же байты
+    std::size_t replaced = 0; // файлы, записанные поверх существующей записи с тем же именем
+    std::size_t skipped = 0;  // имя было занято и выбрано "пропустить": в сейф не записаны
     std::size_t failed = 0;
     std::vector<ImportFailure> failures;
 };

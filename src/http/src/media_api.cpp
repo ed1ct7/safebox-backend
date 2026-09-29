@@ -1,4 +1,4 @@
-// /api/v1/media/:id/{thumbnail,content,download,zip}
+// /api/v1/media/:id/{thumbnail,content,download,zip}; zip - папка или запись с вложениями
 // inline отдаем только фото/видео, остальное attachment, чтобы html/svg из сейфа не исполнялся
 #include <algorithm>
 #include <array>
@@ -48,15 +48,16 @@ void serveStream(httplib::Response& res, app::OpenedContent opened, std::string_
         });
 }
 
+// Архив папки называется "имя.zip", архив вложений записи - "имя (вложения).zip".
 void serveZip(ApiContext& ctx, httplib::Response& res, app::Lease lease,
-              const domain::Entry& folder) {
+              const domain::Entry& entry) {
     auto shared = std::make_shared<app::Lease>(std::move(lease));
-    replaceHeader(res, "Content-Disposition",
-                  contentDisposition("attachment", folder.name + ".zip"));
+    const auto archive = entry.isFolder() ? entry.name + ".zip" : entry.name + " (вложения).zip";
+    replaceHeader(res, "Content-Disposition", contentDisposition("attachment", archive));
     res.status = 200; // явно: chunked-ответ не бывает 206
     res.set_chunked_content_provider(
         "application/zip",
-        [&ctx, shared, id = folder.id](std::size_t /*offset*/, httplib::DataSink& sink) {
+        [&ctx, shared, id = entry.id](std::size_t /*offset*/, httplib::DataSink& sink) {
             DataSinkAdapter out(sink);
             if (!ctx.services.importExport->exportZip(*shared, id, out)) {
                 return false; // заголовки уже ушли: обрыв соединения = сбой загрузки
@@ -160,8 +161,9 @@ void registerMediaApi(httplib::Server& server, ApiContext& ctx) {
                        sendError(res, entry.error());
                        return;
                    }
-                   if (!entry->isFolder()) {
-                       sendError(res, 422, "invalid_argument", "Архивом скачивается только папка");
+                   if (!entry->isFolder() && entry->childCount == 0) {
+                       sendError(res, 422, "invalid_argument",
+                                 "Архивом скачивается папка или запись с вложениями");
                        return;
                    }
                    serveZip(ctx, res, std::move(*lease), *entry);

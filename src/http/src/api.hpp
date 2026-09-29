@@ -23,6 +23,9 @@ namespace safebox::http {
 using Json = nlohmann::json;
 
 inline constexpr std::string_view kImportPath = "/api/v1/import";
+inline constexpr std::string_view kImportPlanPath = "/api/v1/import/plan";
+// Лимит JSON плана и manifest импорта: на 100 000 файлов с длинными путями обычного лимита мало.
+inline constexpr std::size_t kMaxImportJsonBytes = 32 * 1024 * 1024;
 inline constexpr std::string_view kMediaPrefix = "/api/v1/media/";
 inline constexpr std::string_view kMediaCookieName = "sbx_media";
 
@@ -79,6 +82,9 @@ void replaceHeader(httplib::Response& res, const std::string& key, const std::st
 [[nodiscard]] std::optional<std::string> requireString(const Json& body, const char* field,
                                                        httplib::Response& res);
 [[nodiscard]] std::optional<domain::EntryId> parseId(std::string_view text) noexcept;
+// "keepBoth" | "replace" | "skip"
+[[nodiscard]] std::optional<app::ConflictPolicy>
+parseConflictPolicy(std::string_view text) noexcept;
 // Content-Disposition с ASCII-запасным именем и filename* (RFC 5987, UTF-8).
 [[nodiscard]] std::string contentDisposition(std::string_view type, std::string_view fileName);
 

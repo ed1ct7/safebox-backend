@@ -44,6 +44,13 @@ inline std::string fakeJpeg(std::size_t n, std::uint32_t seed = 7) {
     return data;
 }
 
+// Файл партии импорта: путь, содержимое и то, что клиент знает о нем (дата, решение по имени).
+struct ImportFile {
+    std::string path;
+    std::string data;
+    app::ImportFileOptions options = {};
+};
+
 struct AppFixture {
     explicit AppFixture(std::uint32_t chunkSize = kTestChunk) {
         config.kdf = domain::kMinimalKdf;
@@ -71,13 +78,13 @@ struct AppFixture {
     }
 
     domain::ImportResult importFiles(const app::UnlockResult& session,
-                                     const std::vector<std::pair<std::string, std::string>>& files,
+                                     const std::vector<ImportFile>& files,
                                      std::optional<domain::EntryId> parent = std::nullopt,
                                      std::size_t piece = 333) {
         auto import = services.importExport->beginImport(lease(session), parent);
         REQUIRE(import.has_value());
-        for (const auto& [path, data] : files) {
-            REQUIRE((*import)->beginFile(path).has_value());
+        for (const auto& [path, data, options] : files) {
+            REQUIRE((*import)->beginFile(path, options).has_value());
             for (std::size_t off = 0; off < data.size(); off += piece) {
                 const auto part = std::string_view(data).substr(off, piece);
                 REQUIRE((*import)->write(domain::asBytes(part)).has_value());

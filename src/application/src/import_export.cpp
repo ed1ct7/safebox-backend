@@ -3,9 +3,11 @@
 // запись + promote. Какой кусок последний, узнаем только когда кончился поток,
 // поэтому полный кусок держим до прихода следующих байтов.
 // Если упал один файл - удаляем только его pending, остальные импортируются дальше.
-// Файл, который уже лежит в папке (то же имя без учета регистра и те же байты -
-// сверяем по кускам, пока пишем), не вставляется: повторный импорт папки докачивает
-// только новое. Папки по пути тоже сливаются по имени без учета регистра.
+// Имя файла занято (у родителя: снимок каталога плюс созданное этим импортом, без учета
+// регистра): Skip - файл не пишется вообще, KeepBoth - "имя (2).ext", Replace - файл пишется
+// в новый блоб, а в конце у существующей записи меняются блобы и мета (id, имя, описание,
+// теги и дети остаются). Папки по пути сливаются с существующими папками по имени без
+// учета регистра.
 // Чтение: расшифровываем только нужные куски, последний кешируем. Размер и число
 // кусков сверяем с метой записи, не сошлось -> IntegrityError
 #include <algorithm>
@@ -208,7 +210,93 @@ private:
     std::unordered_set<std::string> used_;
 };
 
+constexpr std::string_view kAttachmentsSuffix = " (вложения)";
+
+// Имя записи в архиве: ссылка без блоба лежит ярлыком "имя.url".
+[[nodiscard]] std::string zipName(const domain::Entry& entry) {
+    const bool shortcut = entry.meta.kind == Kind::Link && !entry.meta.blobId;
+    if (shortcut && !domain::detail::iequals(domain::detail::extensionOf(entry.name), ".url")) {
+        return entry.name + ".url";
+    }
+    return entry.name;
+}
+
 // импорт
+
+// Путь файла из запроса: сегменты очищены, ".." или пустой путь - недопустим.
+struct SplitPath {
+    std::string clean; // очищенный путь целиком: для отчета об ошибке
+    std::vector<std::string> dirs;
+    std::string name;
+    bool valid = false;
+};
+
+[[nodiscard]] SplitPath splitPath(std::string_view relativePath) {
+    SplitPath out;
+    std::vector<std::string> parts;
+    bool parent = false;
+    std::size_t start = 0;
+    while (start <= relativePath.size()) {
+        const auto end = relativePath.find_first_of("/\\", start);
+        const auto segment = relativePath.substr(
+            start, end == std::string_view::npos ? std::string_view::npos : end - start);
+        if (segment == "..") {
+            parent = true;
+        } else if (!segment.empty() && segment != ".") {
+            parts.push_back(domain::sanitizeName(segment));
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    for (const auto& part : parts) {
+        out.clean.append(out.clean.empty() ? "" : "/").append(part);
+    }
+    if (parent || parts.empty()) {
+        if (out.clean.empty()) {
+            out.clean = domain::sanitizeName(relativePath);
+        }
+        return out;
+    }
+    out.name = std::move(parts.back());
+    parts.pop_back();
+    out.dirs = std::move(parts);
+    out.valid = true;
+    return out;
+}
+
+// Занятые имена у одного родителя: записи любого вида по folded-имени. С файлом конфликтует
+// первая запись с таким именем; папки в каталоге идут первыми.
+class Siblings {
+public:
+    struct Occupant {
+        EntryId id = 0;
+        bool isFolder = false;
+    };
+
+    Siblings(const Catalog& catalog, std::optional<EntryId> parent) {
+        for (const auto child : catalog.childrenOf(parent)) {
+            const auto* node = catalog.find(child);
+            add(node->folded, Occupant{child, node->entry.isFolder()});
+        }
+    }
+
+    [[nodiscard]] const Occupant* find(const std::string& folded) const {
+        const auto it = byName_.find(folded);
+        return it == byName_.end() ? nullptr : &it->second;
+    }
+    [[nodiscard]] const std::unordered_set<std::string>& taken() const noexcept { return taken_; }
+
+    void add(std::string folded, Occupant occupant) {
+        taken_.insert(folded);
+        byName_.try_emplace(std::move(folded), occupant);
+    }
+
+private:
+    std::unordered_map<std::string, Occupant> byName_;
+    std::unordered_set<std::string> taken_;
+};
 
 class ImportSessionImpl final : public ImportSession {
 public:
@@ -225,7 +313,7 @@ public:
         }
     }
 
-    Status beginFile(std::string_view relativePath) override {
+    Status beginFile(std::string_view relativePath, const ImportFileOptions& options) override {
         if (current_) {
             if (auto st = endFile(); !st) {
                 return st;
@@ -236,46 +324,25 @@ public:
         }
         current_.emplace();
         auto& file = *current_;
+        file.sourceModifiedAt = options.sourceModifiedAt;
 
-        std::vector<std::string> parts;
-        bool invalid = false;
-        std::size_t start = 0;
-        while (start <= relativePath.size()) {
-            const auto end = relativePath.find_first_of("/\\", start);
-            const auto segment = relativePath.substr(
-                start, end == std::string_view::npos ? std::string_view::npos : end - start);
-            if (segment == "..") {
-                invalid = true;
-            } else if (!segment.empty() && segment != ".") {
-                parts.push_back(domain::sanitizeName(segment));
-            }
-            if (end == std::string_view::npos) {
-                break;
-            }
-            start = end + 1;
-        }
-        for (const auto& part : parts) {
-            file.path.append(file.path.empty() ? "" : "/").append(part);
-        }
-        if (invalid || parts.empty()) {
-            if (file.path.empty()) {
-                file.path = domain::sanitizeName(relativePath);
-            }
+        auto split = splitPath(relativePath);
+        file.path = std::move(split.clean);
+        if (!split.valid) {
             failCurrent("Недопустимый путь файла");
             return {};
         }
-        file.name = parts.back();
-        parts.pop_back();
+        file.name = std::move(split.name);
 
-        auto parent = resolveFolders(parts);
+        auto parent = resolveFolders(split.dirs);
         if (!parent) {
             failCurrent(parent.error().message);
             return fatalOnly(parent.error());
         }
         file.parent = *parent;
-        if (auto st = findTwins(file); !st) {
-            failCurrent(st.error().message);
-            return st;
+        resolveName(file, options.onConflict);
+        if (file.skipped) {
+            return {}; // в хранилище не пишем ничего
         }
         auto writer = ports_.store.blobs().create();
         if (!writer) {
@@ -291,8 +358,8 @@ public:
         if (lease_.cancelled()) {
             return cancelledByLock();
         }
-        if (!current_ || current_->failed) {
-            return {}; // поле формы или уже отвергнутый файл - байты просто пропускаем
+        if (!current_ || current_->failed || current_->skipped) {
+            return {}; // поле формы, отвергнутый или пропущенный файл - байты просто пропускаем
         }
         auto& file = *current_;
         std::size_t offset = 0;
@@ -321,11 +388,11 @@ public:
             return {};
         }
         Status fatal;
-        if (!current_->failed) {
+        if (!current_->failed && !current_->skipped) {
             fatal = flush(true);
-        }
-        if (fatal && !current_->failed) {
-            fatal = complete();
+            if (fatal && !current_->failed) {
+                fatal = complete();
+            }
         }
         if (current_->failed) {
             ++result_.failed;
@@ -333,7 +400,8 @@ public:
             discardCurrent();
         } else if (current_->skipped) {
             ++result_.skipped;
-            discardCurrent();
+        } else if (current_->replaces) {
+            ++result_.replaced;
         } else {
             ++result_.imported;
         }
@@ -346,20 +414,23 @@ public:
         if (current_) {
             (void)endFile();
         }
+        if (result_.replaced > 0) {
+            (void)ports_.store.compact(); // старые блобы освободили место в файле
+        }
         return std::move(result_);
     }
 
 private:
     struct CurrentFile {
         std::string path; // для отчета: очищенный относительный путь
-        std::string name;
+        std::string name; // имя новой записи; у замены не используется, только тип по расширению
         std::optional<EntryId> parent;
+        std::optional<EntryId> replaces; // Replace: запись, чей блоб и мета заменяются
+        std::optional<std::int64_t> sourceModifiedAt;
         std::unique_ptr<domain::BlobWriter> writer;
         std::optional<BlobId> thumbBlob;
         Bytes buffer;      // текущий кусок (<= chunkSize)
         Bytes thumbSource; // фото целиком для миниатюры (<= kThumbnailSourceLimit)
-        // файлы папки с тем же именем, чье содержимое пока совпадает с записанным
-        std::vector<std::unique_ptr<ChunkReader>> twins;
         bool collectThumb = false;
         std::uint64_t size = 0;
         std::uint32_t chunks = 0;
@@ -372,16 +443,29 @@ private:
         std::string error;
     };
 
-    struct KnownFolder {
-        EntryId id = 0;
-        bool created = false; // создана этим импортом: в снимке ее детей нет
-    };
-
-    struct KnownFile {
-        BlobId blob = 0;
-        std::uint64_t size = 0;
-    };
-    using FileIndex = std::unordered_multimap<std::string, KnownFile>; // folded имя -> файлы
+    // Имя занято -> по решению: пропуск, уникальное имя или запись поверх существующей.
+    // Существующая папка не заменяется: файл получает уникальное имя рядом.
+    void resolveName(CurrentFile& file, ConflictPolicy policy) {
+        const auto& siblings = siblingsOf(file.parent);
+        const auto* occupant = siblings.find(foldForSearch(file.name));
+        if (occupant == nullptr) {
+            return;
+        }
+        if (policy == ConflictPolicy::Replace && occupant->isFolder) {
+            policy = ConflictPolicy::KeepBoth;
+        }
+        switch (policy) {
+        case ConflictPolicy::Skip:
+            file.skipped = true;
+            break;
+        case ConflictPolicy::Replace:
+            file.replaces = occupant->id;
+            break;
+        case ConflictPolicy::KeepBoth:
+            file.name = uniqueName(file.name, false, siblings.taken());
+            break;
+        }
+    }
 
     // Запечатать и записать текущий кусок; тип файла - по первому куску.
     Status flush(bool last) {
@@ -411,7 +495,6 @@ private:
                                         file.buffer.end());
             }
         }
-        matchTwins(file);
         auto sealed = sealer_->sealChunk(KeyPurpose::Content, file.writer->id(), file.chunks, last,
                                          file.buffer);
         if (!sealed) {
@@ -435,14 +518,6 @@ private:
             failCurrent(e.message);
             return fatalOnly(e);
         };
-        // Все куски совпали с файлом того же имени и размер тот же - это он и
-        // есть, второй раз не вставляем.
-        if (std::ranges::any_of(file.twins,
-                                [&](const auto& twin) { return twin->size() == file.size; })) {
-            file.skipped = true;
-            return {};
-        }
-        file.twins.clear();
         if (auto st = file.writer->finish(file.size); !st) {
             return failWith(st.error());
         }
@@ -464,35 +539,10 @@ private:
         if (!uow) {
             return failWith(uow.error());
         }
-        domain::EntryRecord record;
-        record.parentId = file.parent;
-        record.isFolder = false;
-        record.blobId = file.writer->id();
-        record.thumbBlobId = file.thumbBlob;
-        auto id = (*uow)->entries().insert(record);
+        const auto now = domain::toUnixMillis(ports_.clock.now());
+        auto id = file.replaces ? replaceEntry(**uow, now) : insertEntry(**uow, now);
         if (!id) {
             return failWith(id.error());
-        }
-        const auto now = domain::toUnixMillis(ports_.clock.now());
-        domain::EntryMeta meta;
-        meta.kind = file.kind;
-        meta.mime = file.mime;
-        meta.size = file.size;
-        meta.url = file.url;
-        meta.createdAt = now;
-        meta.modifiedAt = now;
-        meta.blobId = file.writer->id();
-        meta.thumbBlobId = file.thumbBlob;
-        auto encName = sealer_->sealName(*id, file.name);
-        if (!encName) {
-            return failWith(encName.error());
-        }
-        auto encMeta = sealer_->sealMeta(*id, meta);
-        if (!encMeta) {
-            return failWith(encMeta.error());
-        }
-        if (auto st = (*uow)->entries().updateSealed(*id, *encName, *encMeta); !st) {
-            return failWith(st.error());
         }
         if (auto st = (*uow)->blobs().promote(file.writer->id()); !st) {
             return failWith(st.error());
@@ -506,94 +556,121 @@ private:
             return failWith(st.error());
         }
         file.committed = true;
-        // дубликат внутри одной партии тоже пропустится
-        filesOf(file.parent)
-            .emplace(foldForSearch(file.name), KnownFile{file.writer->id(), file.size});
+        if (!file.replaces) {
+            // следующие файлы партии с этим именем уже конфликтуют с ним
+            siblingsOf(file.parent).add(foldForSearch(file.name), {*id, false});
+        }
         session_.invalidateCatalog();
         return {};
     }
 
-    // Файлы папки по именам: из снимка каталога плюс вставленные этим импортом.
-    FileIndex& filesOf(std::optional<EntryId> parent) {
-        const auto [it, inserted] = files_.try_emplace(parent);
-        if (inserted) {
-            for (const auto child : snapshot_->childrenOf(parent)) {
-                const auto* node = snapshot_->find(child);
-                if (node != nullptr && !node->entry.isFolder() && node->entry.meta.blobId) {
-                    it->second.emplace(node->folded,
-                                       KnownFile{*node->entry.meta.blobId, node->entry.meta.size});
+    // Поля записи, которые определяются самим файлом.
+    void applyContent(domain::EntryMeta& meta, std::int64_t now) const {
+        const auto& file = *current_;
+        meta.kind = file.kind;
+        meta.mime = file.mime;
+        meta.size = file.size;
+        meta.url = file.url;
+        meta.modifiedAt = now;
+        meta.blobId = file.writer->id();
+        meta.thumbBlobId = file.thumbBlob;
+        meta.sourceModifiedAt = file.sourceModifiedAt;
+    }
+
+    Result<EntryId> insertEntry(domain::UnitOfWork& uow, std::int64_t now) {
+        const auto& file = *current_;
+        domain::EntryRecord record;
+        record.parentId = file.parent;
+        record.isFolder = false;
+        record.blobId = file.writer->id();
+        record.thumbBlobId = file.thumbBlob;
+        auto id = uow.entries().insert(record);
+        if (!id) {
+            return std::unexpected(id.error());
+        }
+        domain::EntryMeta meta;
+        meta.createdAt = now;
+        applyContent(meta, now);
+        auto encName = sealer_->sealName(*id, file.name);
+        if (!encName) {
+            return std::unexpected(encName.error());
+        }
+        auto encMeta = sealer_->sealMeta(*id, meta);
+        if (!encMeta) {
+            return std::unexpected(encMeta.error());
+        }
+        if (auto st = uow.entries().updateSealed(*id, *encName, *encMeta); !st) {
+            return std::unexpected(st.error());
+        }
+        return *id;
+    }
+
+    // Существующая запись получает новые блобы и содержимое меты; старые блобы уходят здесь же.
+    Result<EntryId> replaceEntry(domain::UnitOfWork& uow, std::int64_t now) {
+        const auto& file = *current_;
+        auto record = uow.entries().get(*file.replaces);
+        if (!record) {
+            return std::unexpected(record.error());
+        }
+        auto entry = sealer_->openEntry(*record);
+        if (!entry) {
+            return std::unexpected(entry.error());
+        }
+        applyContent(entry->meta, now);
+        auto encMeta = sealer_->sealMeta(record->id, entry->meta);
+        domain::secureWipe(entry->name);
+        domain::secureWipe(entry->meta.description);
+        if (!encMeta) {
+            return std::unexpected(encMeta.error());
+        }
+        const auto oldBlob = record->blobId;
+        const auto oldThumb = record->thumbBlobId;
+        record->blobId = file.writer->id();
+        record->thumbBlobId = file.thumbBlob;
+        record->encMeta = std::move(*encMeta);
+        if (auto st = uow.entries().update(*record); !st) {
+            return std::unexpected(st.error());
+        }
+        for (const auto stale : {oldBlob, oldThumb}) {
+            if (stale) {
+                if (auto st = uow.blobs().remove(*stale); !st) {
+                    return std::unexpected(st.error());
                 }
             }
         }
-        return it->second;
+        return record->id;
     }
 
-    // Кандидаты в дубликаты: файлы папки с тем же именем без учета регистра.
-    // Битый кандидат просто не дубликат, прерывает только блокировка.
-    Status findTwins(CurrentFile& file) {
-        const auto [from, to] = filesOf(file.parent).equal_range(foldForSearch(file.name));
-        for (auto it = from; it != to; ++it) {
-            auto blob = checkedBlob(ports_.store.blobs(), it->second.blob, KeyPurpose::Content,
-                                    it->second.size, chunkSize_);
-            if (!blob) {
-                if (auto st = fatalOnly(blob.error()); !st) {
-                    return st;
-                }
-                continue;
-            }
-            file.twins.push_back(std::make_unique<ChunkReader>(lease_, ports_.store.blobs(),
-                                                               sealer_, *blob, chunkSize_));
-        }
-        return {};
-    }
-
-    // Сверить текущий кусок с кандидатами: короче или байты разошлись -> не дубликат.
-    void matchTwins(CurrentFile& file) {
-        const auto end = file.size + file.buffer.size();
-        std::erase_if(file.twins, [&](const std::unique_ptr<ChunkReader>& twin) {
-            if (end > twin->size()) {
-                return true;
-            }
-            auto chunk = twin->chunk(file.chunks);
-            return !chunk || !std::ranges::equal(*chunk, file.buffer);
-        });
+    Siblings& siblingsOf(std::optional<EntryId> parent) {
+        return siblings_.try_emplace(parent, *snapshot_, parent).first->second;
     }
 
     Result<std::optional<EntryId>> resolveFolders(const std::vector<std::string>& dirs) {
         std::optional<EntryId> parent = root_;
-        bool parentCreated = false;
         std::string key;
         for (const auto& dir : dirs) {
             // без учета регистра: "Pict" и "pict" на Windows - одна папка
             const auto foldedDir = foldForSearch(dir);
             key.append(foldedDir).push_back('/');
             if (const auto it = folders_.find(key); it != folders_.end()) {
-                parent = it->second.id;
-                parentCreated = it->second.created;
+                parent = it->second;
                 continue;
             }
-            std::optional<EntryId> found;
-            if (!parentCreated) {
-                for (const auto child : snapshot_->childrenOf(parent)) {
-                    const auto* node = snapshot_->find(child);
-                    if (node != nullptr && node->entry.isFolder() && node->folded == foldedDir) {
-                        found = child;
-                        break;
-                    }
-                }
-            }
-            bool created = false;
-            if (!found) {
+            auto& siblings = siblingsOf(parent);
+            const auto* found = siblings.find(foldedDir);
+            EntryId folder = 0;
+            if (found != nullptr && found->isFolder) {
+                folder = found->id;
+            } else {
                 auto made = createFolder(parent, dir);
                 if (!made) {
                     return std::unexpected(made.error());
                 }
-                found = *made;
-                created = true;
+                folder = *made;
+                siblings.add(foldedDir, {folder, true});
             }
-            folders_.emplace(key, KnownFolder{*found, created});
-            parent = found;
-            parentCreated = created;
+            folders_.emplace(key, folder);
+            parent = folder;
         }
         return parent;
     }
@@ -683,7 +760,6 @@ private:
         if (current_) {
             domain::secureWipe(current_->buffer);
             domain::secureWipe(current_->thumbSource);
-            current_->twins.clear(); // ChunkReader стирает свой кеш сам
         }
     }
 
@@ -694,8 +770,8 @@ private:
     std::optional<EntryId> root_;
     VaultSession::CatalogPtr snapshot_; // каталог на начало импорта
     std::uint32_t chunkSize_;
-    std::map<std::string, KnownFolder> folders_;        // "a/b/" (folded) -> папка этого импорта
-    std::map<std::optional<EntryId>, FileIndex> files_; // папка -> ее файлы, для дубликатов
+    std::map<std::string, EntryId> folders_; // "a/b/" (folded) -> папка, найденная или созданная
+    std::map<std::optional<EntryId>, Siblings> siblings_; // родитель -> занятые имена
     std::optional<CurrentFile> current_;
     domain::ImportResult result_;
 };
@@ -716,19 +792,64 @@ public:
         if (!catalog) {
             return std::unexpected(catalog.error());
         }
-        if (parent) {
-            const auto* node = (*catalog)->find(*parent);
-            if (node == nullptr) {
-                return fail(Error::Code::NotFound, "Папка не найдена");
-            }
-            if (!node->entry.isFolder()) {
-                return fail(Error::Code::InvalidArgument, "Импорт возможен только в папку");
-            }
+        if (parent && (*catalog)->find(*parent) == nullptr) {
+            return fail(Error::Code::NotFound, "Объект не найден");
         }
         VaultSession& session = ctx->session;
         auto sealer = ctx->sealer;
         return std::unique_ptr<ImportSession>(std::make_unique<ImportSessionImpl>(
             std::move(lease), ports_, session, std::move(sealer), parent, std::move(*catalog)));
+    }
+
+    Result<ImportPlan> planImport(const Lease& lease, std::optional<EntryId> parent,
+                                  std::span<const ImportPlanFile> files) override {
+        auto ctx = contextOf(lease);
+        if (!ctx) {
+            return std::unexpected(ctx.error());
+        }
+        auto catalog = catalogOf(*ctx, ports_.store);
+        if (!catalog) {
+            return std::unexpected(catalog.error());
+        }
+        const Catalog& cat = **catalog;
+        if (parent && cat.find(*parent) == nullptr) {
+            return fail(Error::Code::NotFound, "Объект не найден");
+        }
+        std::map<std::optional<EntryId>, Siblings> siblings;
+        const auto siblingsOf = [&](std::optional<EntryId> id) -> const Siblings& {
+            return siblings.try_emplace(id, cat, id).first->second;
+        };
+
+        ImportPlan plan;
+        for (const auto& file : files) {
+            if (lease.cancelled()) {
+                return cancelledByLock();
+            }
+            const auto split = splitPath(file.path);
+            if (!split.valid) {
+                ++plan.newFiles;
+                continue;
+            }
+            // Как при импорте, но ничего не создаем: нет папки пути - конфликтовать не с чем.
+            std::optional<EntryId> dir = parent;
+            bool exists = true;
+            for (const auto& name : split.dirs) {
+                const auto* folder = siblingsOf(dir).find(foldForSearch(name));
+                if (folder == nullptr || !folder->isFolder) {
+                    exists = false;
+                    break;
+                }
+                dir = folder->id;
+            }
+            const auto* occupant =
+                exists ? siblingsOf(dir).find(foldForSearch(split.name)) : nullptr;
+            if (occupant == nullptr) {
+                ++plan.newFiles;
+                continue;
+            }
+            plan.conflicts.push_back({file.path, cat.describe(*cat.find(occupant->id))});
+        }
+        return plan;
     }
 
     Result<OpenedContent> openContent(Lease lease, EntryId id, ContentVariant variant) override {
@@ -778,7 +899,7 @@ public:
         return out;
     }
 
-    Status exportZip(const Lease& lease, EntryId folder, domain::ByteSink& out) override {
+    Status exportZip(const Lease& lease, EntryId id, domain::ByteSink& out) override {
         auto ctx = contextOf(lease);
         if (!ctx) {
             return std::unexpected(ctx.error());
@@ -788,22 +909,85 @@ public:
             return std::unexpected(catalog.error());
         }
         const Catalog& cat = **catalog;
-        const auto* root = cat.find(folder);
+        const auto* root = cat.find(id);
         if (root == nullptr) {
-            return fail(Error::Code::NotFound, "Папка не найдена");
+            return fail(Error::Code::NotFound, "Объект не найден");
         }
-        if (!root->entry.isFolder()) {
-            return fail(Error::Code::InvalidArgument, "Это не папка");
+        if (!root->entry.isFolder() && root->childCount == 0) {
+            return fail(Error::Code::InvalidArgument,
+                        "Архивом скачивается папка или запись с вложениями");
         }
         const auto chunkSize = ctx->session.chunkSize();
         auto zip = ports_.zip.start(out);
 
         struct Item {
             EntryId id;
-            std::string path;
+            std::string path;        // путь записи в архиве
+            std::string attachments; // каталог вложений не-папки с детьми, иначе пусто
         };
-        std::vector<Item> stack{{folder, root->entry.name}};
-        std::unordered_set<EntryId> visited;
+        std::vector<Item> stack;
+        // Каталог и его дети (в стек - так, чтобы первый ребенок вышел первым). Имена
+        // уникальны; каталоги вложений получают их после настоящих записей: настоящие
+        // имена не сдвигаются.
+        const auto openDirectory = [&](EntryId dir, const std::string& path) -> Status {
+            if (auto st = zip->addDirectory(path + "/", cat.find(dir)->entry.meta.modifiedAt);
+                !st) {
+                return st;
+            }
+            struct Child {
+                EntryId id;
+                std::string leaf;
+                std::string attachments;
+            };
+            UniqueNames names;
+            std::vector<Child> children;
+            for (const auto child : cat.childrenOf(dir)) {
+                const auto& entry = cat.find(child)->entry;
+                children.push_back({child, names.take(zipName(entry), entry.isFolder()), {}});
+            }
+            for (auto& child : children) {
+                const auto* node = cat.find(child.id);
+                if (!node->entry.isFolder() && node->childCount > 0) {
+                    child.attachments =
+                        names.take(child.leaf + std::string(kAttachmentsSuffix), true);
+                }
+            }
+            for (auto it = children.rbegin(); it != children.rend(); ++it) {
+                stack.push_back(
+                    {it->id, path + "/" + it->leaf,
+                     it->attachments.empty() ? std::string{} : path + "/" + it->attachments});
+            }
+            return {};
+        };
+        const auto addFile = [&](const std::string& path, const domain::Entry& entry) -> Status {
+            if (!entry.meta.blobId) {
+                if (entry.meta.kind != Kind::Link) {
+                    return corruptedData();
+                }
+                // ссылка без блоба - ярлык, как его сделал бы проводник
+                auto shortcut = "[InternetShortcut]\r\nURL=" + entry.meta.url + "\r\n";
+                domain::MemorySource source(domain::asBytes(shortcut));
+                auto st = zip->addFile(path, shortcut.size(), entry.meta.modifiedAt, source);
+                domain::secureWipe(shortcut);
+                return st;
+            }
+            auto blob = checkedBlob(ports_.store.blobs(), *entry.meta.blobId, KeyPurpose::Content,
+                                    entry.meta.size, chunkSize);
+            if (!blob) {
+                return std::unexpected(blob.error());
+            }
+            ChunkReader reader(lease, ports_.store.blobs(), ctx->sealer, *blob, chunkSize);
+            BlobSource source(reader);
+            return zip->addFile(path, blob->size, entry.meta.modifiedAt, source);
+        };
+
+        // Папка входит в архив своим каталогом; у записи - только каталог ее вложений.
+        const auto& top = root->entry;
+        const auto topPath = top.isFolder() ? top.name : top.name + std::string(kAttachmentsSuffix);
+        if (auto st = openDirectory(id, topPath); !st) {
+            return st;
+        }
+        std::unordered_set<EntryId> visited{id};
         while (!stack.empty()) {
             Item item = std::move(stack.back());
             stack.pop_back();
@@ -815,32 +999,18 @@ public:
             }
             const auto& entry = cat.find(item.id)->entry;
             if (entry.isFolder()) {
-                if (auto st = zip->addDirectory(item.path + "/", entry.meta.modifiedAt); !st) {
+                if (auto st = openDirectory(item.id, item.path); !st) {
                     return st;
-                }
-                UniqueNames names;
-                std::vector<Item> next;
-                for (const auto child : cat.childrenOf(item.id)) {
-                    const auto& c = cat.find(child)->entry;
-                    next.push_back({child, item.path + "/" + names.take(c.name, c.isFolder())});
-                }
-                for (auto it = next.rbegin(); it != next.rend(); ++it) {
-                    stack.push_back(std::move(*it));
                 }
                 continue;
             }
-            if (!entry.meta.blobId) {
-                return corruptedData();
-            }
-            auto blob = checkedBlob(ports_.store.blobs(), *entry.meta.blobId, KeyPurpose::Content,
-                                    entry.meta.size, chunkSize);
-            if (!blob) {
-                return std::unexpected(blob.error());
-            }
-            ChunkReader reader(lease, ports_.store.blobs(), ctx->sealer, *blob, chunkSize);
-            BlobSource source(reader);
-            if (auto st = zip->addFile(item.path, blob->size, entry.meta.modifiedAt, source); !st) {
+            if (auto st = addFile(item.path, entry); !st) {
                 return st;
+            }
+            if (!item.attachments.empty()) {
+                if (auto st = openDirectory(item.id, item.attachments); !st) {
+                    return st;
+                }
             }
         }
         return zip->finish();

@@ -1,7 +1,7 @@
 // Проверки до роутинга. На 127.0.0.1 может постучаться любая страница в браузере, поэтому:
 // - Host только из белого списка (DNS rebinding)
 // - Origin на изменяющих запросах, Sec-Fetch-Site: cross-site режем
-// - тело только JSON и с лимитом размера (кроме импорта)
+// - тело только JSON и с лимитом размера (кроме импорта; у плана импорта лимит свой)
 #include <algorithm>
 #include <charconv>
 #include <format>
@@ -116,7 +116,9 @@ HandlerResponse guardRequest(const ApiContext& ctx, const httplib::Request& req,
         const auto text = req.get_header_value("Content-Length");
         std::uint64_t length = 0;
         const auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), length);
-        if (ec != std::errc{} || length > ctx.config.maxJsonBody) {
+        const auto maxBody =
+            req.path == kImportPlanPath ? kMaxImportJsonBytes : ctx.config.maxJsonBody;
+        if (ec != std::errc{} || length > maxBody) {
             return reject(res, 413, "payload_too_large", "Слишком большое тело запроса");
         }
     }

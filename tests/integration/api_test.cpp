@@ -212,12 +212,33 @@ TEST_CASE("full user flow over HTTP: create, import, browse, stream, zip, lock, 
         CHECK(Json::parse(imported->body)["imported"] == 3);
         CHECK(Json::parse(imported->body)["failed"] == 0);
 
-        // повторный импорт того же - все уже есть, папки не задваиваются
-        auto again = c.Post("/api/v1/import", bearer(token), items);
-        REQUIRE(again);
-        REQUIRE(again->status == 200);
-        CHECK(Json::parse(again->body)["imported"] == 0);
-        CHECK(Json::parse(again->body)["skipped"] == 3);
+        // повторный импорт того же: план видит три совпадения, manifest пропускает их -
+        // ничего не записано, папки не задваиваются
+        const auto plan = post(c, "/api/v1/import/plan",
+                               {{"files",
+                                 {{{"path", "Отпуск/фото.png"}, {"size", png.size()}},
+                                  {{"path", "Отпуск/Вложенная/видео.mp4"}, {"size", video.size()}},
+                                  {{"path", "документ.txt"}, {"size", doc.size()}}}}},
+                               200, bearer(token));
+        CHECK(plan["conflicts"].size() == 3);
+        CHECK(plan["newFiles"] == 0);
+        httplib::UploadFormDataItems again = {
+            {"manifest",
+             Json{{"files",
+                   {{"Отпуск/фото.png", {{"onConflict", "skip"}}},
+                    {"Отпуск/Вложенная/видео.mp4", {{"onConflict", "skip"}}},
+                    {"документ.txt", {{"onConflict", "skip"}}}}}}
+                 .dump(),
+             "", "application/json"},
+            items[0],
+            items[1],
+            items[2],
+        };
+        auto skipped = c.Post("/api/v1/import", bearer(token), again);
+        REQUIRE(skipped);
+        REQUIRE(skipped->status == 200);
+        CHECK(Json::parse(skipped->body)["imported"] == 0);
+        CHECK(Json::parse(skipped->body)["skipped"] == 3);
 
         // навигация
         const auto root = get(c, "/api/v1/entries", token);
@@ -283,6 +304,8 @@ TEST_CASE("full user flow over HTTP: create, import, browse, stream, zip, lock, 
         CHECK(files.at("Отпуск/фото.png") == png);
         CHECK(files.at("Отпуск/Вложенная/видео.mp4") == video);
         CHECK(files.at("Отпуск/Вложенная/") == "<dir>");
+        CHECK(zipped->get_header_value("Content-Disposition").find("filename=\"") !=
+              std::string::npos);
 
         // смена пароля
         post(c, "/api/v1/safe/password",
@@ -470,4 +493,172 @@ TEST_CASE("organizing over HTTP: description, move with conflicts, attachments, 
     CHECK(byName(reopened, "Цель")["childCount"] == 2);
     CHECK(get(c, "/api/v1/entries/" + std::to_string(idOf(survivor)), token2)["name"] ==
           "заметка.txt");
+}
+
+TEST_CASE("re-importing a folder over HTTP: plan, then a manifest with the decisions",
+          "[integration][UF-15]") {
+    test::TempDir dir;
+    Stack stack(dir.path());
+    auto c = stack.client();
+    const auto session =
+        post(c, "/api/v1/safe/create",
+             {{"path", "Повторный"}, {"password", "пароль-1"}, {"confirm", "пароль-1"}}, 201);
+    const auto token = session["token"].get<std::string>();
+
+    const auto manifestOf = [](const Json& files) { return Json{{"files", files}}.dump(); };
+    const auto upload = [&](const std::string& manifest, httplib::UploadFormDataItems files,
+                            const std::string& query = {}) {
+        httplib::UploadFormDataItems items;
+        if (!manifest.empty()) {
+            items.push_back({"manifest", manifest, "", "application/json"});
+        }
+        items.insert(items.end(), files.begin(), files.end());
+        auto r = c.Post("/api/v1/import" + query, bearer(token), items);
+        REQUIRE(r);
+        INFO(r->body);
+        return r;
+    };
+    const auto listing = [&](std::int64_t parent) {
+        return get(c, "/api/v1/entries?parentId=" + std::to_string(parent), token);
+    };
+    const auto contentOf = [&](const Json& entry) {
+        auto r =
+            c.Get("/api/v1/media/" + std::to_string(entry["id"].get<std::int64_t>()) + "/content",
+                  bearer(token));
+        REQUIRE(r);
+        return r->body;
+    };
+
+    // первый импорт папки: даты файлов на диске приходят в manifest
+    auto first = upload(
+        manifestOf({{"pict/a.txt", {{"lastModified", 1'700'000'000'000}}},
+                    {"pict/b.txt", {{"lastModified", 1'700'000'100'000}}}}),
+        {{"file", "AAA", "pict/a.txt", "text/plain"}, {"file", "BBB", "pict/b.txt", "text/plain"}});
+    REQUIRE(first->status == 200);
+    CHECK(Json::parse(first->body)["imported"] == 2);
+    const auto pict = byName(get(c, "/api/v1/entries", token), "pict");
+    const auto pictId = pict["id"].get<std::int64_t>();
+    CHECK(byName(listing(pictId), "a.txt")["sourceModifiedAt"] == 1'700'000'000'000);
+
+    // на диске добавился c.txt: план показывает совпадения (с датой файла в сейфе) и новый файл
+    const auto plan = post(c, "/api/v1/import/plan",
+                           {{"files",
+                             {{{"path", "pict/a.txt"}, {"size", 3}},
+                              {{"path", "pict/b.txt"}, {"size", 3}},
+                              {{"path", "pict/c.txt"}, {"size", 3}}}}},
+                           200, bearer(token));
+    REQUIRE(plan["conflicts"].size() == 2);
+    CHECK(plan["newFiles"] == 1);
+    CHECK(plan["conflicts"][0]["path"] == "pict/a.txt");
+    CHECK(plan["conflicts"][0]["existing"]["name"] == "a.txt");
+    CHECK(plan["conflicts"][0]["existing"]["size"] == 3);
+    CHECK(plan["conflicts"][0]["existing"]["sourceModifiedAt"] == 1'700'000'000'000);
+    CHECK(plan["conflicts"][1]["existing"]["sourceModifiedAt"] == 1'700'000'100'000);
+
+    // "Пропустить": на сервер идет только новый файл
+    auto onlyNew = upload("", {{"file", "CCC", "pict/c.txt", "text/plain"}});
+    REQUIRE(onlyNew->status == 200);
+    CHECK(Json::parse(onlyNew->body) == Json({{"imported", 1},
+                                              {"replaced", 0},
+                                              {"skipped", 0},
+                                              {"failed", 0},
+                                              {"failures", Json::array()}}));
+    CHECK(listing(pictId)["entries"].size() == 3);
+    CHECK(contentOf(byName(listing(pictId), "a.txt")) == "AAA");
+
+    // то же, но клиент отправил и совпадения с решением skip: результат тот же, лишнего в сейфе нет
+    auto sentAll = upload(manifestOf({{"pict/a.txt", {{"onConflict", "skip"}}},
+                                      {"pict/b.txt", {{"onConflict", "skip"}}},
+                                      {"pict/c.txt", {{"onConflict", "skip"}}}}),
+                          {{"file", "AAA", "pict/a.txt", "text/plain"},
+                           {"file", "BBB", "pict/b.txt", "text/plain"},
+                           {"file", "CCC", "pict/c.txt", "text/plain"}});
+    REQUIRE(sentAll->status == 200);
+    CHECK(Json::parse(sentAll->body)["skipped"] == 3);
+    CHECK(Json::parse(sentAll->body)["imported"] == 0);
+    CHECK(listing(pictId)["entries"].size() == 3);
+
+    // "Заменить" a.txt (запись остается, меняется содержимое и дата), b.txt - оба
+    const auto aBefore = byName(listing(pictId), "a.txt");
+    auto mixed =
+        upload(manifestOf({{"pict/a.txt",
+                            {{"onConflict", "replace"}, {"lastModified", 1'800'000'000'000}}},
+                           {"pict/b.txt", {{"onConflict", "keepBoth"}}}}),
+               {{"file", "AAA-новый", "pict/a.txt", "text/plain"},
+                {"file", "BBB-копия", "pict/b.txt", "text/plain"}});
+    REQUIRE(mixed->status == 200);
+    const auto result = Json::parse(mixed->body);
+    CHECK(result["imported"] == 1);
+    CHECK(result["replaced"] == 1);
+    CHECK(result["skipped"] == 0);
+    const auto after = listing(pictId);
+    CHECK(after["entries"].size() == 4);
+    const auto aAfter = byName(after, "a.txt");
+    CHECK(aAfter["id"] == aBefore["id"]);
+    CHECK(aAfter["sourceModifiedAt"] == 1'800'000'000'000);
+    CHECK(aAfter["createdAt"] == aBefore["createdAt"]);
+    CHECK(contentOf(aAfter) == "AAA-новый");
+    CHECK(contentOf(byName(after, "b.txt")) == "BBB");
+    CHECK(contentOf(byName(after, "b (2).txt")) == "BBB-копия");
+    CHECK(byName(after, "b (2).txt")["sourceModifiedAt"].is_null());
+
+    // импорт во вложения файла: имена сверяются у него
+    const auto aId = aAfter["id"].get<std::int64_t>();
+    auto attach = upload("", {{"file", "вложение", "n.txt", "text/plain"}},
+                         "?parentId=" + std::to_string(aId));
+    REQUIRE(attach->status == 200);
+    CHECK(Json::parse(attach->body)["imported"] == 1);
+    CHECK(listing(aId)["parent"]["name"] == "a.txt");
+    const auto attachPlan =
+        post(c, "/api/v1/import/plan?parentId=" + std::to_string(aId),
+             {{"files", {{{"path", "n.txt"}, {"size", 1}}, {{"path", "a.txt"}, {"size", 1}}}}}, 200,
+             bearer(token));
+    CHECK(attachPlan["conflicts"].size() == 1);
+    CHECK(attachPlan["newFiles"] == 1);
+
+    // архив вложений: имя "имя (вложения).zip", внутри каталог с тем же именем
+    auto zipped = c.Get("/api/v1/media/" + std::to_string(aId) + "/zip", bearer(token));
+    REQUIRE(zipped);
+    REQUIRE(zipped->status == 200);
+    const auto files = unzip(zipped->body);
+    CHECK(files.at("a.txt (вложения)/") == "<dir>");
+    CHECK(files.at("a.txt (вложения)/n.txt") == "вложение");
+    CHECK(files.size() == 2);
+    auto plain =
+        c.Get("/api/v1/media/" + std::to_string(byName(after, "b.txt")["id"].get<std::int64_t>()) +
+                  "/zip",
+              bearer(token));
+    REQUIRE(plain);
+    CHECK(plain->status == 422);
+}
+
+TEST_CASE("a broken or misplaced manifest imports nothing over HTTP", "[integration][UF-15]") {
+    test::TempDir dir;
+    Stack stack(dir.path());
+    auto c = stack.client();
+    const auto session =
+        post(c, "/api/v1/safe/create",
+             {{"path", "Манифест"}, {"password", "пароль-1"}, {"confirm", "пароль-1"}}, 201);
+    const auto token = session["token"].get<std::string>();
+
+    httplib::UploadFormDataItems broken = {{"manifest", "{\"files\": ", "", "application/json"},
+                                           {"file", "A", "a.txt", "text/plain"}};
+    auto refused = c.Post("/api/v1/import", bearer(token), broken);
+    REQUIRE(refused);
+    CHECK(refused->status == 400);
+    CHECK(Json::parse(refused->body)["error"]["code"] == "bad_request");
+
+    httplib::UploadFormDataItems late = {{"note", "text", "", ""},
+                                         {"manifest", "{}", "", "application/json"},
+                                         {"file", "A", "a.txt", "text/plain"}};
+    auto misplaced = c.Post("/api/v1/import", bearer(token), late);
+    REQUIRE(misplaced);
+    CHECK(misplaced->status == 400);
+
+    CHECK(get(c, "/api/v1/entries", token)["entries"].empty());
+    // и сервер после отказов жив
+    httplib::UploadFormDataItems fine = {{"file", "A", "a.txt", "text/plain"}};
+    auto ok = c.Post("/api/v1/import", bearer(token), fine);
+    REQUIRE(ok);
+    CHECK(ok->status == 200);
 }

@@ -42,6 +42,19 @@ std::optional<domain::EntryId> parseId(std::string_view text) noexcept {
     return id;
 }
 
+std::optional<app::ConflictPolicy> parseConflictPolicy(std::string_view text) noexcept {
+    if (text == "keepBoth") {
+        return app::ConflictPolicy::KeepBoth;
+    }
+    if (text == "replace") {
+        return app::ConflictPolicy::Replace;
+    }
+    if (text == "skip") {
+        return app::ConflictPolicy::Skip;
+    }
+    return std::nullopt;
+}
+
 std::string contentDisposition(std::string_view type, std::string_view fileName) {
     std::string ascii;
     std::string encoded;
@@ -198,6 +211,14 @@ Json toJson(const domain::SearchHit& hit) {
         {"path", toJson(hit.path)},
         {"matchedIn", std::move(matchedIn)},
     };
+}
+
+Json toJson(const app::ImportPlan& plan) {
+    Json conflicts = Json::array();
+    for (const auto& conflict : plan.conflicts) {
+        conflicts.push_back(Json{{"path", conflict.path}, {"existing", toJson(conflict.existing)}});
+    }
+    return Json{{"conflicts", std::move(conflicts)}, {"newFiles", plan.newFiles}};
 }
 
 Json toJson(const domain::ImportResult& result) {

@@ -630,6 +630,212 @@ TEST_CASE("import streams multipart parts into the import session", "[http][impo
     CHECK(notMultipart.status == 415);
 }
 
+namespace {
+
+std::string multipartPart(const std::string& disposition, const std::string& content,
+                          const std::string& type = {}) {
+    return "--XyZ\r\nContent-Disposition: " + disposition + "\r\n" +
+           (type.empty() ? "" : "Content-Type: " + type + "\r\n") + "\r\n" + content + "\r\n";
+}
+
+std::string manifestPart(const std::string& json) {
+    return multipartPart("form-data; name=\"manifest\"", json, "application/json");
+}
+
+std::string filePart(const std::string& filename, const std::string& content) {
+    return multipartPart("form-data; name=\"file\"; filename=\"" + filename + "\"", content);
+}
+
+Reply postImport(HttpFixture& f, const std::string& parts, const std::string& query = {}) {
+    return f.request("POST", "/api/v1/import" + query,
+                     {"Authorization: Bearer " + std::string(kApiToken),
+                      "Content-Type: multipart/form-data; boundary=XyZ",
+                      "Origin: http://127.0.0.1:8900"},
+                     parts + "--XyZ--\r\n");
+}
+
+} // namespace
+
+TEST_CASE("import applies the manifest to the files it names", "[http][import][manifest]") {
+    HttpFixture f;
+    const std::string manifest =
+        R"({"files":{"Папка/a.txt":{"lastModified":1700000000123,"onConflict":"replace"},)"
+        R"("b.bin":{"onConflict":"skip"},"d.txt":{"lastModified":1700000000000.9},)"
+        R"("e.txt":{"lastModified":null,"onConflict":null},"unused.txt":{}}})";
+    auto ok = postImport(f, manifestPart(manifest) + filePart("Папка/a.txt", "AAA") +
+                                filePart("b.bin", "BBB") + filePart("c.txt", "CCC") +
+                                filePart("d.txt", "DDD") + filePart("e.txt", "EEE"));
+    REQUIRE(ok.status == 200);
+    CHECK(ok.json()["imported"] == 5); // счет ведет фейковая сессия
+    const auto& files = f.fakes.importExport->imported;
+    CHECK(files.size() == 5); // сам manifest файлом не стал
+    CHECK(files.at("Папка/a.txt") == "AAA");
+    const auto& options = f.fakes.importExport->importOptions;
+    CHECK(options.at("Папка/a.txt").sourceModifiedAt == 1'700'000'000'123);
+    CHECK(options.at("Папка/a.txt").onConflict == app::ConflictPolicy::Replace);
+    CHECK_FALSE(options.at("b.bin").sourceModifiedAt.has_value());
+    CHECK(options.at("b.bin").onConflict == app::ConflictPolicy::Skip);
+    // файла нет в manifest: без даты и keepBoth
+    CHECK_FALSE(options.at("c.txt").sourceModifiedAt.has_value());
+    CHECK(options.at("c.txt").onConflict == app::ConflictPolicy::KeepBoth);
+    CHECK(options.at("d.txt").sourceModifiedAt == 1'700'000'000'000); // дробные мс отбрасываются
+    CHECK(options.at("e.txt").onConflict == app::ConflictPolicy::KeepBoth); // null - как нет
+    CHECK_FALSE(options.at("e.txt").sourceModifiedAt.has_value());
+
+    SECTION("a part named manifest with a filename is a file") {
+        f.fakes.importExport->imported.clear();
+        auto plain =
+            postImport(f, filePart("x.txt", "X") +
+                              multipartPart("form-data; name=\"manifest\"; filename=\"manifest\"",
+                                            "not json"));
+        REQUIRE(plain.status == 200);
+        CHECK(f.fakes.importExport->imported.size() == 2);
+        CHECK(f.fakes.importExport->imported.at("manifest") == "not json");
+    }
+    SECTION("the manifest without files is fine") {
+        f.fakes.importExport->imported.clear();
+        CHECK(postImport(f, manifestPart("{}") + filePart("x.txt", "X")).status == 200);
+        CHECK(f.fakes.importExport->imported.size() == 1);
+    }
+}
+
+TEST_CASE("a bad manifest is refused before any file is imported", "[http][import][manifest]") {
+    HttpFixture f;
+    const auto refused = [&](const std::string& parts) {
+        auto reply = postImport(f, parts);
+        CHECK(reply.status == 400);
+        CHECK(reply.errorCode() == "bad_request");
+    };
+
+    SECTION("broken JSON") {
+        refused(manifestPart("{\"files\": ") + filePart("a.txt", "A"));
+        CHECK(f.fakes.importExport->imported.empty());
+    }
+    SECTION("not an object") {
+        refused(manifestPart("[1,2]") + filePart("a.txt", "A"));
+        refused(manifestPart("\"text\"") + filePart("a.txt", "A"));
+        CHECK(f.fakes.importExport->imported.empty());
+    }
+    SECTION("wrong shapes") {
+        const auto file = filePart("a.txt", "A");
+        refused(manifestPart(R"({"files":[]})") + file);
+        refused(manifestPart(R"({"files":{"a.txt":5}})") + file);
+        refused(manifestPart(R"({"files":{"a.txt":{"onConflict":"overwrite"}}})") + file);
+        refused(manifestPart(R"({"files":{"a.txt":{"onConflict":1}}})") + file);
+        refused(manifestPart(R"({"files":{"a.txt":{"lastModified":"yesterday"}}})") + file);
+        refused(manifestPart(R"({"files":{"a.txt":{"lastModified":1e300}}})") + file);
+        CHECK(f.fakes.importExport->imported.empty());
+    }
+    SECTION("the manifest is the last part") {
+        refused(filePart("a.txt", "A") + manifestPart("{}"));
+    }
+    SECTION("the manifest after a text field is not the first part either") {
+        refused(multipartPart("form-data; name=\"note\"", "text") + manifestPart("{}") +
+                filePart("a.txt", "A"));
+        CHECK(f.fakes.importExport->imported.empty());
+    }
+    SECTION("the manifest is over 32 MiB") {
+        auto huge = postImport(f, manifestPart(std::string(32 * 1024 * 1024 + 1, ' ')) +
+                                      filePart("a.txt", "A"));
+        CHECK(huge.status == 413);
+        CHECK(huge.errorCode() == "payload_too_large");
+        CHECK(f.fakes.importExport->imported.empty());
+        // ровно 32 МиБ еще проходят
+        auto edge = postImport(f, manifestPart("{" + std::string(32 * 1024 * 1024 - 2, ' ') + "}") +
+                                      filePart("a.txt", "A"));
+        CHECK(edge.status == 200);
+    }
+    SECTION("two manifests") {
+        refused(manifestPart("{}") + manifestPart("{}") + filePart("a.txt", "A"));
+        CHECK(f.fakes.importExport->imported.empty()); // до файла дело не дошло
+    }
+}
+
+TEST_CASE("import/plan passes the paths on and answers with the clashes", "[http][import][plan]") {
+    HttpFixture f;
+    auto existing = makeEntry(2, 1, domain::Kind::Photo, "море.jpg");
+    existing.meta.sourceModifiedAt = 1'700'000'000'000;
+    f.fakes.importExport->plan = app::ImportPlan{{{"Отпуск/море.jpg", existing}}, 2};
+
+    auto r = f.api("POST", "/api/v1/import/plan?parentId=1",
+                   R"({"files":[{"path":"Отпуск/море.jpg","size":11},{"path":"a.txt","size":5},)"
+                   R"({"path":"b.txt","size":0}]})");
+    REQUIRE(r.status == 200);
+    CHECK(r.json()["newFiles"] == 2);
+    REQUIRE(r.json()["conflicts"].size() == 1);
+    CHECK(r.json()["conflicts"][0]["path"] == "Отпуск/море.jpg");
+    CHECK(r.json()["conflicts"][0]["existing"]["id"] == 2);
+    CHECK(r.json()["conflicts"][0]["existing"]["name"] == "море.jpg");
+    CHECK(r.json()["conflicts"][0]["existing"]["sourceModifiedAt"] == 1'700'000'000'000);
+    CHECK(f.fakes.importExport->planParent == 1);
+    const auto& planned = f.fakes.importExport->planFiles;
+    REQUIRE(planned.size() == 3);
+    CHECK(planned[0].path == "Отпуск/море.jpg");
+    CHECK(planned[0].size == 11);
+    CHECK(planned[1].path == "a.txt");
+
+    // без parentId - корень; размер необязателен
+    auto root = f.api("POST", "/api/v1/import/plan", R"({"files":[{"path":"x"}]})");
+    REQUIRE(root.status == 200);
+    CHECK_FALSE(f.fakes.importExport->planParent.has_value());
+    CHECK(f.fakes.importExport->planFiles[0].size == 0);
+    auto none = f.api("POST", "/api/v1/import/plan", R"({"files":[]})");
+    CHECK(none.status == 200);
+
+    // без токена - как у остальных
+    CHECK(f.request("POST", "/api/v1/import/plan", {"Content-Type: application/json"},
+                    R"({"files":[]})")
+              .status == 401);
+}
+
+TEST_CASE("import/plan rejects a malformed body and too many files", "[http][import][plan]") {
+    HttpFixture f;
+    const auto bad = [&](const std::string& body, const std::string& query = {}) {
+        auto r = f.api("POST", "/api/v1/import/plan" + query, body);
+        CHECK(r.status == 400);
+        CHECK(r.errorCode() == "bad_request");
+    };
+    bad(R"({"files":)");
+    bad(R"([])");
+    bad(R"({})");
+    bad(R"({"files":{}})");
+    bad(R"({"files":[1]})");
+    bad(R"({"files":[{"size":1}]})");
+    bad(R"({"files":[{"path":5}]})");
+    bad(R"({"files":[{"path":"a","size":-1}]})");
+    bad(R"({"files":[{"path":"a","size":"big"}]})");
+    bad(R"({"files":[]})", "?parentId=abc");
+    CHECK(f.fakes.importExport->planFiles.empty());
+
+    // предел - 100 000 файлов; тело такого плана намного больше обычного лимита JSON (1 КиБ в
+    // тесте)
+    const auto plan = [](std::size_t count) {
+        std::string body = R"({"files":[)";
+        for (std::size_t i = 0; i < count; ++i) {
+            body += i == 0 ? "" : ",";
+            body += R"({"path":"папка/файл)" + std::to_string(i) + R"(.txt","size":1})";
+        }
+        return body + "]}";
+    };
+    auto full = f.api("POST", "/api/v1/import/plan", plan(100'000));
+    REQUIRE(full.status == 200);
+    CHECK(f.fakes.importExport->planFiles.size() == 100'000);
+    auto over = f.api("POST", "/api/v1/import/plan", plan(100'001));
+    CHECK(over.status == 422);
+    CHECK(over.errorCode() == "invalid_argument");
+
+    // остальные JSON-маршруты по-прежнему держат малый лимит
+    CHECK(f.api("POST", "/api/v1/entries/move/plan", plan(100)).status == 413);
+}
+
+TEST_CASE("import/plan maps service errors", "[http][import][plan]") {
+    HttpFixture f;
+    f.fakes.importExport->planError = domain::Error{Code::NotFound, "Объект не найден"};
+    auto r = f.api("POST", "/api/v1/import/plan?parentId=99", R"({"files":[]})");
+    CHECK(r.status == 404);
+    CHECK(r.errorCode() == "not_found");
+}
+
 TEST_CASE("media content supports Range and never renders active content inline", "[http][media]") {
     HttpFixture f;
     auto full = f.api("GET", "/api/v1/media/2/content");
@@ -678,7 +884,36 @@ TEST_CASE("downloads carry the original name; folders stream as zip", "[http][me
     auto viaDownload = f.api("GET", "/api/v1/media/1/download"); // папка -> zip
     CHECK(viaDownload.body == "PK-fake-zip");
     auto notFolder = f.api("GET", "/api/v1/media/2/zip");
-    CHECK(notFolder.status == 422);
+    CHECK(notFolder.status == 422); // не папка и без вложений
+    CHECK(notFolder.errorCode() == "invalid_argument");
+}
+
+TEST_CASE("zip names: folder.zip, and 'name (вложения).zip' for an entry with attachments",
+          "[http][media][UF-11][UF-14]") {
+    HttpFixture f;
+    auto folder = f.api("GET", "/api/v1/media/1/zip");
+    CHECK(folder.header("content-disposition")
+              .find("filename*=UTF-8''%D0%9E%D1%82%D0%BF%D1%83%D1%81%D0%BA.zip") !=
+          std::string::npos);
+    CHECK(f.fakes.importExport->lastZipId == 1);
+
+    f.fakes.entries->entries[2].childCount = 2; // у фото появились вложения
+    auto attachments = f.api("GET", "/api/v1/media/2/zip");
+    REQUIRE(attachments.status == 200);
+    CHECK(attachments.body == "PK-fake-zip");
+    CHECK(attachments.header("content-type") == "application/zip");
+    CHECK(f.fakes.importExport->lastZipId == 2);
+    // "море.jpg (вложения).zip"
+    CHECK(
+        attachments.header("content-disposition")
+            .find(
+                "filename*=UTF-8''%D0%BC%D0%BE%D1%80%D0%B5.jpg%20%28%D0%B2%D0%BB%D0%BE%D0%B6%D0%B5"
+                "%D0%BD%D0%B8%D1%8F%29.zip") != std::string::npos);
+
+    // скачивание записи с вложениями отдает саму запись, а не архив
+    auto file = f.api("GET", "/api/v1/media/2/download");
+    CHECK(file.header("content-type") == "application/octet-stream");
+    CHECK(file.body == "0123456789ABCDEF");
 }
 
 TEST_CASE("frontend assets and unknown routes", "[http][assets]") {

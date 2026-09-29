@@ -151,6 +151,12 @@ public:
 
 // ImportExportService
 
+// Что известно о файле кроме пути: дата исходного файла и как поступить, если имя занято.
+struct ImportFileOptions {
+    std::optional<std::int64_t> sourceModifiedAt; // unix-мс изменения файла на диске
+    ConflictPolicy onConflict = ConflictPolicy::KeepBoth;
+};
+
 // Потоковый импорт одного запроса: http проталкивает части multipart по
 // мере чтения сокета. Ошибка отдельного файла не прерывает импорт - она
 // попадает в итог; наружу (Status) выходит только фатальное: отмена lock'ом.
@@ -158,8 +164,10 @@ class ImportSession {
 public:
     virtual ~ImportSession() = default; // незавершенный файл -> его pending удаляется
 
-    // relativePath - "Папка/Подпапка/файл.jpg" (структура папок сохраняется)
-    [[nodiscard]] virtual Status beginFile(std::string_view relativePath) = 0;
+    // relativePath - "Папка/Подпапка/файл.jpg" (структура папок сохраняется). Skip - байты
+    // следующих write игнорируются, в хранилище не пишется ничего.
+    [[nodiscard]] virtual Status beginFile(std::string_view relativePath,
+                                           const ImportFileOptions& options) = 0;
     [[nodiscard]] virtual Status write(std::span<const std::byte> data) = 0;
     [[nodiscard]] virtual Status endFile() = 0;
     [[nodiscard]] virtual domain::ImportResult finish() = 0;
@@ -188,16 +196,40 @@ struct OpenedContent {
     std::unique_ptr<ContentStream> stream; // держит аренду, пока жив
 };
 
+struct ImportPlanFile {
+    std::string path; // как в beginFile
+    std::uint64_t size = 0;
+};
+
+// Файл плана, чье имя уже занято у целевого родителя.
+struct ImportConflict {
+    std::string path;       // как в ImportPlanFile
+    domain::Entry existing; // запись, занявшая имя
+};
+
+struct ImportPlan {
+    std::vector<ImportConflict> conflicts;
+    // Файлы без конфликта; недопустимый путь тоже здесь: он упадет уже при импорте.
+    std::size_t newFiles = 0;
+};
+
 class ImportExportService {
 public:
     virtual ~ImportExportService() = default;
 
+    // parent - любая запись (импорт во вложения); нет такой -> NotFound.
     [[nodiscard]] virtual Result<std::unique_ptr<ImportSession>>
     beginImport(Lease lease, std::optional<domain::EntryId> parent) = 0;
+    // Какие файлы столкнутся по имени с записями сейфа, если импортировать их в parent; ничего
+    // не создает (несуществующие папки пути - значит конфликтов в них нет).
+    [[nodiscard]] virtual Result<ImportPlan> planImport(const Lease& lease,
+                                                        std::optional<domain::EntryId> parent,
+                                                        std::span<const ImportPlanFile> files) = 0;
     [[nodiscard]] virtual Result<OpenedContent> openContent(Lease lease, domain::EntryId id,
                                                             ContentVariant variant) = 0;
-    // папка -> потоковый zip (STORE) в out; синхронно, под арендой вызывающего.
-    [[nodiscard]] virtual Status exportZip(const Lease& lease, domain::EntryId folder,
+    // Папка или запись с вложениями -> потоковый zip (STORE) в out; синхронно, под арендой
+    // вызывающего. Запись без вложений и не папка -> InvalidArgument.
+    [[nodiscard]] virtual Status exportZip(const Lease& lease, domain::EntryId id,
                                            domain::ByteSink& out) = 0;
 };
 

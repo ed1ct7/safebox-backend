@@ -79,16 +79,8 @@ namespace {
     }
     for (const auto& [key, value] : it->items()) {
         const auto id = parseId(key);
-        std::optional<app::ConflictPolicy> policy;
-        if (value.is_string()) {
-            if (value == "keepBoth") {
-                policy = app::ConflictPolicy::KeepBoth;
-            } else if (value == "replace") {
-                policy = app::ConflictPolicy::Replace;
-            } else if (value == "skip") {
-                policy = app::ConflictPolicy::Skip;
-            }
-        }
+        const auto policy =
+            value.is_string() ? parseConflictPolicy(value.get<std::string>()) : std::nullopt;
         if (!id || !policy) {
             sendError(res, 400, "bad_request", "Некорректное решение о конфликте имен");
             return false;

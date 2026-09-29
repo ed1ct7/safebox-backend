@@ -224,11 +224,14 @@ private:
 
 class FakeImportSession final : public app::ImportSession {
 public:
-    explicit FakeImportSession(std::map<std::string, std::string>& files) : files_(files) {}
+    FakeImportSession(std::map<std::string, std::string>& files,
+                      std::map<std::string, app::ImportFileOptions>& options)
+        : files_(files), options_(options) {}
 
-    app::Status beginFile(std::string_view path) override {
+    app::Status beginFile(std::string_view path, const app::ImportFileOptions& options) override {
         current_ = std::string(path);
         files_[current_];
+        options_[current_] = options;
         return {};
     }
     app::Status write(std::span<const std::byte> data) override {
@@ -244,6 +247,7 @@ public:
 
 private:
     std::map<std::string, std::string>& files_;
+    std::map<std::string, app::ImportFileOptions>& options_;
     std::string current_;
 };
 
@@ -252,7 +256,19 @@ public:
     app::Result<std::unique_ptr<app::ImportSession>>
     beginImport(app::Lease, std::optional<domain::EntryId> parent) override {
         importParent = parent;
-        return std::unique_ptr<app::ImportSession>(std::make_unique<FakeImportSession>(imported));
+        return std::unique_ptr<app::ImportSession>(
+            std::make_unique<FakeImportSession>(imported, importOptions));
+    }
+
+    app::Result<app::ImportPlan> planImport(const app::Lease&,
+                                            std::optional<domain::EntryId> parent,
+                                            std::span<const app::ImportPlanFile> files) override {
+        if (planError) {
+            return std::unexpected(*planError);
+        }
+        planParent = parent;
+        planFiles.assign(files.begin(), files.end());
+        return plan;
     }
 
     app::Result<app::OpenedContent> openContent(app::Lease, domain::EntryId id,
@@ -270,13 +286,20 @@ public:
         return out;
     }
 
-    app::Status exportZip(const app::Lease&, domain::EntryId, domain::ByteSink& out) override {
+    app::Status exportZip(const app::Lease&, domain::EntryId id, domain::ByteSink& out) override {
+        lastZipId = id;
         return out.write(domain::asBytes("PK-fake-zip"));
     }
 
     std::string content = "0123456789ABCDEF";
     std::map<std::string, std::string> imported;
+    std::map<std::string, app::ImportFileOptions> importOptions; // что дошло в beginFile
     std::optional<domain::EntryId> importParent;
+    app::ImportPlan plan;
+    std::optional<domain::Error> planError;
+    std::optional<domain::EntryId> planParent;
+    std::optional<domain::EntryId> lastZipId;
+    std::vector<app::ImportPlanFile> planFiles;
 };
 
 class FakeSearchService final : public app::SearchService {
