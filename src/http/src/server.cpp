@@ -22,6 +22,16 @@ HttpServer::HttpServer(app::Services services, AssetProvider& assets, HttpConfig
     auto& server = impl_->server;
     server.set_payload_max_length((std::numeric_limits<std::size_t>::max)());
     server.set_tcp_nodelay(true);
+    // httplib по умолчанию ставит SO_REUSEPORT/SO_REUSEADDR, а с ними второй процесс может
+    // занять уже слушаемый порт и перехватывать запросы. На Windows без опций занятый порт
+    // дает ошибку bind; в других ОС SO_REUSEADDR пускает только мимо TIME_WAIT.
+    server.set_socket_options([](auto sock) {
+#if defined(_WIN32)
+        (void)sock;
+#else
+        httplib::set_socket_opt(sock, SOL_SOCKET, SO_REUSEADDR, 1);
+#endif
+    });
     // Медленный источник импорта (флешка, большой файл в браузере) - не обрыв.
     server.set_read_timeout(std::chrono::seconds(30));
     if (impl_->ctx.config.log) {
