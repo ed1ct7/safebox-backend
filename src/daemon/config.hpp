@@ -23,6 +23,7 @@ struct Config {
     std::chrono::seconds presenceTimeout{2 * 60};
     std::filesystem::path defaultDirectory;
     bool quiet = false;
+    bool noWindow = false; // сервер без окна приложения (Windows; на других системах окна нет)
     bool showHelp = false;
     bool showVersion = false;
 };

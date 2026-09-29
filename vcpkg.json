@@ -13,7 +13,11 @@
     },
     "stb",
     "miniz",
-    "libwebp"
+    "libwebp",
+    {
+      "name": "webview2",
+      "platform": "windows"
+    }
   ],
   "features": {
     "tests": {

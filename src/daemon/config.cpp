@@ -171,6 +171,8 @@ domain::Result<Config> parseConfig(std::span<const std::string> args, const EnvL
             config.showVersion = true;
         } else if (arg == "--quiet") {
             config.quiet = true;
+        } else if (arg == "--no-window") {
+            config.noWindow = true;
         } else if (arg.starts_with("--")) {
             auto key = arg.substr(2);
             std::string_view value;
@@ -217,6 +219,8 @@ std::string usage() {
            "  --safe-dir <папка>        база относительных путей к сейфу (по умолчанию "
            "'Документы')\n"
            "  --quiet                   не печатать журнал запросов\n"
+           "  --no-window               режим сервера без окна: интерфейс открывается в браузере\n"
+           "                            (на Windows окно приложения - по умолчанию)\n"
            "  --version, --help\n"
            "\n"
            "Те же параметры: SAFEBOX_HOST, SAFEBOX_PORT, SAFEBOX_ALLOW_HOSTS, "

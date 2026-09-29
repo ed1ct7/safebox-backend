@@ -1,0 +1,4 @@
+// Resources of safeboxd. Icon id 1: shown by Explorer for the exe and used by the app window
+// (kIconResource in app_window.cpp). Regenerate the icon with scripts/make_icon.py.
+
+1 ICON "safebox.ico"
