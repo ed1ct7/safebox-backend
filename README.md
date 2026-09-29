@@ -16,7 +16,7 @@
 
 - `src/domain` - модель, правила и интерфейсы (порты), header-only
 - `src/application` - сервисы: сейф, записи, импорт/экспорт, поиск
-- `src/infrastructure` - реализации портов на libsodium, sqlite, stb, miniz
+- `src/infrastructure` - реализации портов на libsodium, sqlite, stb, libwebp, miniz
 - `src/http` - REST API на cpp-httplib
 - `src/daemon` - main, конфиг, вшитый фронт
 
@@ -94,7 +94,7 @@ Catch2, запуск через `ctest --preset msvc-debug`. Наборы:
 
 - `safebox-app-tests` - сервисы на in-memory хранилище, но с настоящим libsodium
 - `safebox-http-tests` - http-слой на фейковых сервисах, без сети
-- `safebox-infra-tests` - sqlite, libsodium, stb, zip
+- `safebox-infra-tests` - sqlite, libsodium, stb, webp, zip
 - `safebox-integration-tests` - весь стек на случайном порту
 
 ## Ограничения

@@ -10,7 +10,7 @@
 safeboxd (src/daemon)
   |-- safebox-http (src/http)          REST на cpp-httplib
   |     `-- safebox-core = domain + application
-  `-- safebox-infra (src/infrastructure)   sqlite, libsodium, stb, miniz
+  `-- safebox-infra (src/infrastructure)   sqlite, libsodium, stb, libwebp, miniz
         `-- safebox-domain
 ```
 
@@ -62,7 +62,12 @@ safeboxd (src/daemon)
 растет от размера файла.
 
 Относительные пути приходят в `filename` (webkitRelativePath), папки находятся по
-имени или создаются. Ссылки попадают в сейф импортом `.url` ярлыков.
+имени без учета регистра или создаются. Ссылки попадают в сейф импортом `.url` ярлыков.
+
+Повторный импорт той же папки докачивает только новое. Если в папке уже есть файл с
+тем же именем, его куски расшифровываются и сравниваются с новыми по мере записи;
+совпал до байта - новый pending выбрасывается и считается в `skipped`. Хешей в мете
+нет, поэтому сравнение честное, но стоит чтения старого файла.
 
 Range для видео разбирает httplib. Мы переводим смещение в номера кусков и
 расшифровываем только нужные, последний кусок кешируется.
@@ -94,7 +99,7 @@ miniz берем только crc32: miniz пишет с seek, а в http-отв
 - application - сервисы на `InMemoryVaultStore` и `FakeClock`, но с настоящим libsodium
   (фейковый шифр не поймал бы ошибки с AAD)
 - http - на фейковых сервисах, запросы подаются в httplib без сокетов
-- infra - настоящие sqlite, libsodium, stb, zip (архив читается miniz)
+- infra - настоящие sqlite, libsodium, stb и libwebp, zip (архив читается miniz)
 - integration - весь стек на случайном порту: create, import, list, search, range, zip,
   lock, потом проверка что копия файла открывается
 
