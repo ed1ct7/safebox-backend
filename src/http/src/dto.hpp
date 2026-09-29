@@ -1,4 +1,4 @@
-// JSON для ответов, должно совпадать с docs/api.md и types.ts на фронте
+// JSON для ответов, должно совпадать с контрактом REST API (Linqtab) и types.ts на фронте
 #pragma once
 
 #include <string_view>

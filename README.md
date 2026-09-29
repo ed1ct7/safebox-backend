@@ -7,10 +7,8 @@
 Собирается в один exe `safeboxd`, который поднимает HTTP-сервер на `127.0.0.1:8900`
 (REST API под `/api/v1`) и может раздавать фронт, если его вшить при сборке.
 
-Доки:
-- [docs/architecture.md](docs/architecture.md) - архитектура и структура проекта
-- [docs/safebox-format.md](docs/safebox-format.md) - формат файла сейфа
-- [docs/api.md](docs/api.md) - API для фронта
+Документация лежит в Linqtab (продукт Safebox, папка «ТЗ SafeBox v2»): ТЗ и требования,
+архитектура, структура проекта, контракт REST API и формат файла сейфа.
 
 ## Структура
 
@@ -85,8 +83,8 @@ curl http://127.0.0.1:8900/health
 При Ctrl+C или закрытии консоли сейф блокируется перед выходом.
 
 Для разработки фронта: запускать `safeboxd --allow-origin http://localhost:5173`, а в Vite
-настроить прокси `/api` на `http://127.0.0.1:8900` с `changeOrigin: true` (подробнее в конце
-docs/api.md).
+настроить прокси `/api` на `http://127.0.0.1:8900` с `changeOrigin: true` (подробнее в
+контракте REST API, раздел «Фронт»).
 
 ## Тесты
 

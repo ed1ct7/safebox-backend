@@ -1,6 +1,6 @@
 # safebox v2 backend
 # слои: domain <- application <- http, infra реализует порты домена, daemon собирает все вместе.
-# схема слоев в docs/architecture.md
+# схема слоев - в Linqtab, «Архитектура бэкенда - решение»
 
 cmake_minimum_required(VERSION 3.24)
 

@@ -1,4 +1,4 @@
-// Маршруты. Полный список с форматами - docs/api.md
+// Маршруты. Полный список с форматами - контракт REST API в Linqtab
 #include "api.hpp"
 
 namespace safebox::http {

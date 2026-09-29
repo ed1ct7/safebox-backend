@@ -1,4 +1,4 @@
-// Константы формата .safebox, подробно формат описан в docs/safebox-format.md
+// Константы формата .safebox, подробно формат описан в Linqtab, «Формат файла *.safebox»
 // AAD (все little-endian):
 //   конверт     = версия u32 | соль 16 | ops u64 | mem u64
 //   кусок       = версия u32 | blob_id i64 | idx u32 | last u8
