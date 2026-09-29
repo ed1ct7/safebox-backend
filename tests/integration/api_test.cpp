@@ -212,6 +212,13 @@ TEST_CASE("full user flow over HTTP: create, import, browse, stream, zip, lock, 
         CHECK(Json::parse(imported->body)["imported"] == 3);
         CHECK(Json::parse(imported->body)["failed"] == 0);
 
+        // повторный импорт того же - все уже есть, папки не задваиваются
+        auto again = c.Post("/api/v1/import", bearer(token), items);
+        REQUIRE(again);
+        REQUIRE(again->status == 200);
+        CHECK(Json::parse(again->body)["imported"] == 0);
+        CHECK(Json::parse(again->body)["skipped"] == 3);
+
         // навигация
         const auto root = get(c, "/api/v1/entries", token);
         REQUIRE(root["entries"].size() == 2);

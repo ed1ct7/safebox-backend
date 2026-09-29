@@ -157,6 +157,95 @@ TEST_CASE("names from disk are sanitized instead of rejected", "[import][UF-7]")
     CHECK(f.entryNamed(s, "we_ird_.txt", dir.id).meta.size == 1);
 }
 
+TEST_CASE("re-import merges folders and skips files already there", "[import][UF-7]") {
+    AppFixture f;
+    auto s = f.createSafe();
+
+    REQUIRE(f.importFiles(s, {{"pict/a.txt", "AAA"}, {"pict/b.txt", "BBB"}}).imported == 2);
+
+    // на диске появился новый файл, папку импортируют еще раз целиком
+    const auto second =
+        f.importFiles(s, {{"pict/a.txt", "AAA"}, {"pict/b.txt", "BBB"}, {"pict/c.txt", "CCC"}});
+    CHECK(second.imported == 1); // только новый
+    CHECK(second.skipped == 2);  // уже были
+    CHECK(second.failed == 0);
+
+    auto root = f.services.entries->list(f.lease(s), std::nullopt);
+    REQUIRE(root.has_value());
+    REQUIRE(root->entries.size() == 1); // pict не задвоилась
+    auto files = f.services.entries->list(f.lease(s), root->entries[0].id);
+    REQUIRE(files.has_value());
+    REQUIRE(files->entries.size() == 3);
+    CHECK(files->entries[0].name == "a.txt");
+    CHECK(files->entries[0].meta.size == 3);
+    CHECK(f.readContent(s, files->entries[0].id) == "AAA"); // содержимое прежнее
+    CHECK(f.store.pendingBlobs(f.safePath()) == 0);         // дубликаты не оставляют мусора
+
+    SECTION("case does not matter: PICT is the same folder") {
+        const auto third = f.importFiles(s, {{"PICT/d.txt", "DDDD"}});
+        CHECK(third.imported == 1);
+        auto after = f.services.entries->list(f.lease(s), std::nullopt);
+        REQUIRE(after.has_value());
+        REQUIRE(after->entries.size() == 1); // вторая папка не создана
+        CHECK(f.entryNamed(s, "d.txt", root->entries[0].id).meta.size == 4);
+    }
+
+    SECTION("same name with different size is not a duplicate") {
+        const auto r = f.importFiles(s, {{"pict/a.txt", "AAAA"}});
+        CHECK(r.imported == 1);
+        CHECK(r.skipped == 0);
+
+        // теперь в папке два a.txt: совпадение с любым из них - дубликат
+        const auto again = f.importFiles(s, {{"pict/a.txt", "AAAA"}, {"pict/A.TXT", "AAA"}});
+        CHECK(again.imported == 0);
+        CHECK(again.skipped == 2);
+    }
+
+    SECTION("same name and size but other bytes is a new version, not a duplicate") {
+        const auto r = f.importFiles(s, {{"pict/a.txt", "AAB"}});
+        CHECK(r.imported == 1);
+        CHECK(r.skipped == 0);
+    }
+
+    SECTION("duplicate inside one batch is skipped too") {
+        const auto r = f.importFiles(s, {{"x.txt", "same"}, {"x.txt", "same"}});
+        CHECK(r.imported == 1);
+        CHECK(r.skipped == 1);
+    }
+
+    SECTION("folders created by this import are merged regardless of case") {
+        const auto r = f.importFiles(s, {{"New/a.txt", "1"}, {"NEW/b.txt", "2"}});
+        CHECK(r.imported == 2);
+        auto after = f.services.entries->list(f.lease(s), std::nullopt);
+        REQUIRE(after.has_value());
+        CHECK(after->entries.size() == 2); // pict и New
+    }
+}
+
+TEST_CASE("duplicates are compared byte by byte across chunks", "[import][UF-7]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    const auto big = randomBytes(kTestChunk * 3 + 17);
+    REQUIRE(f.importFiles(s, {{"big.bin", big}}).imported == 1);
+
+    CHECK(f.importFiles(s, {{"big.bin", big}}).skipped == 1);
+
+    // отличие только в последнем куске
+    auto tail = big;
+    tail.back() = static_cast<char>(tail.back() ^ 1);
+    // отличие только в первом куске
+    auto head = big;
+    head.front() = static_cast<char>(head.front() ^ 1);
+    // тот же префикс, но короче / длиннее
+    const auto shorter = big.substr(0, kTestChunk * 2);
+    const auto longer = big + "x";
+    const auto r = f.importFiles(
+        s, {{"big.bin", tail}, {"big.bin", head}, {"big.bin", shorter}, {"big.bin", longer}});
+    CHECK(r.imported == 4);
+    CHECK(r.skipped == 0);
+    CHECK(f.store.pendingBlobs(f.safePath()) == 0);
+}
+
 TEST_CASE("lock during import cancels it and leaves no garbage", "[import][UF-13][concurrency]") {
     AppFixture f;
     auto s = f.createSafe();

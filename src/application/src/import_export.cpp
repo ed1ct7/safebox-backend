@@ -3,10 +3,14 @@
 // запись + promote. Какой кусок последний, узнаем только когда кончился поток,
 // поэтому полный кусок держим до прихода следующих байтов.
 // Если упал один файл - удаляем только его pending, остальные импортируются дальше.
+// Файл, который уже лежит в папке (то же имя без учета регистра и те же байты -
+// сверяем по кускам, пока пишем), не вставляется: повторный импорт папки докачивает
+// только новое. Папки по пути тоже сливаются по имени без учета регистра.
 // Чтение: расшифровываем только нужные куски, последний кешируем. Размер и число
 // кусков сверяем с метой записи, не сошлось -> IntegrityError
 #include <algorithm>
 #include <map>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "safebox/domain/model/rules.hpp"
@@ -279,6 +283,10 @@ public:
             return fatalOnly(parent.error());
         }
         file.parent = *parent;
+        if (auto st = findTwins(file); !st) {
+            failCurrent(st.error().message);
+            return st;
+        }
         auto writer = ports_.store.blobs().create();
         if (!writer) {
             failCurrent(writer.error().message);
@@ -333,6 +341,9 @@ public:
             ++result_.failed;
             result_.failures.push_back({current_->path, current_->error});
             discardCurrent();
+        } else if (current_->skipped) {
+            ++result_.skipped;
+            discardCurrent();
         } else {
             ++result_.imported;
         }
@@ -357,6 +368,8 @@ private:
         std::optional<BlobId> thumbBlob;
         Bytes buffer;      // текущий кусок (<= chunkSize)
         Bytes thumbSource; // фото целиком для миниатюры (<= kThumbnailSourceLimit)
+        // файлы папки с тем же именем, чье содержимое пока совпадает с записанным
+        std::vector<std::unique_ptr<ChunkReader>> twins;
         bool collectThumb = false;
         std::uint64_t size = 0;
         std::uint32_t chunks = 0;
@@ -365,6 +378,7 @@ private:
         std::string url;
         bool failed = false;
         bool committed = false;
+        bool skipped = false;
         std::string error;
     };
 
@@ -372,6 +386,12 @@ private:
         EntryId id = 0;
         bool created = false; // создана этим импортом: в снимке ее детей нет
     };
+
+    struct KnownFile {
+        BlobId blob = 0;
+        std::uint64_t size = 0;
+    };
+    using FileIndex = std::unordered_multimap<std::string, KnownFile>; // folded имя -> файлы
 
     // Запечатать и записать текущий кусок; тип файла - по первому куску.
     Status flush(bool last) {
@@ -401,6 +421,7 @@ private:
                                         file.buffer.end());
             }
         }
+        matchTwins(file);
         auto sealed = sealer_->sealChunk(KeyPurpose::Content, file.writer->id(), file.chunks, last,
                                          file.buffer);
         if (!sealed) {
@@ -424,6 +445,14 @@ private:
             failCurrent(e.message);
             return fatalOnly(e);
         };
+        // Все куски совпали с файлом того же имени и размер тот же - это он и
+        // есть, второй раз не вставляем.
+        if (std::ranges::any_of(file.twins,
+                                [&](const auto& twin) { return twin->size() == file.size; })) {
+            file.skipped = true;
+            return {};
+        }
+        file.twins.clear();
         if (auto st = file.writer->finish(file.size); !st) {
             return failWith(st.error());
         }
@@ -487,8 +516,57 @@ private:
             return failWith(st.error());
         }
         file.committed = true;
+        // дубликат внутри одной партии тоже пропустится
+        filesOf(file.parent)
+            .emplace(foldForSearch(file.name), KnownFile{file.writer->id(), file.size});
         session_.invalidateCatalog();
         return {};
+    }
+
+    // Файлы папки по именам: из снимка каталога плюс вставленные этим импортом.
+    FileIndex& filesOf(std::optional<EntryId> parent) {
+        const auto [it, inserted] = files_.try_emplace(parent);
+        if (inserted) {
+            for (const auto child : snapshot_->childrenOf(parent)) {
+                const auto* node = snapshot_->find(child);
+                if (node != nullptr && !node->entry.isFolder() && node->entry.meta.blobId) {
+                    it->second.emplace(node->folded,
+                                       KnownFile{*node->entry.meta.blobId, node->entry.meta.size});
+                }
+            }
+        }
+        return it->second;
+    }
+
+    // Кандидаты в дубликаты: файлы папки с тем же именем без учета регистра.
+    // Битый кандидат просто не дубликат, прерывает только блокировка.
+    Status findTwins(CurrentFile& file) {
+        const auto [from, to] = filesOf(file.parent).equal_range(foldForSearch(file.name));
+        for (auto it = from; it != to; ++it) {
+            auto blob = checkedBlob(ports_.store.blobs(), it->second.blob, KeyPurpose::Content,
+                                    it->second.size, chunkSize_);
+            if (!blob) {
+                if (auto st = fatalOnly(blob.error()); !st) {
+                    return st;
+                }
+                continue;
+            }
+            file.twins.push_back(std::make_unique<ChunkReader>(lease_, ports_.store.blobs(),
+                                                               sealer_, *blob, chunkSize_));
+        }
+        return {};
+    }
+
+    // Сверить текущий кусок с кандидатами: короче или байты разошлись -> не дубликат.
+    void matchTwins(CurrentFile& file) {
+        const auto end = file.size + file.buffer.size();
+        std::erase_if(file.twins, [&](const std::unique_ptr<ChunkReader>& twin) {
+            if (end > twin->size()) {
+                return true;
+            }
+            auto chunk = twin->chunk(file.chunks);
+            return !chunk || !std::ranges::equal(*chunk, file.buffer);
+        });
     }
 
     Result<std::optional<EntryId>> resolveFolders(const std::vector<std::string>& dirs) {
@@ -496,7 +574,9 @@ private:
         bool parentCreated = false;
         std::string key;
         for (const auto& dir : dirs) {
-            key.append(dir).push_back('/');
+            // без учета регистра: "Pict" и "pict" на Windows - одна папка
+            const auto foldedDir = foldForSearch(dir);
+            key.append(foldedDir).push_back('/');
             if (const auto it = folders_.find(key); it != folders_.end()) {
                 parent = it->second.id;
                 parentCreated = it->second.created;
@@ -506,7 +586,7 @@ private:
             if (!parentCreated) {
                 for (const auto child : snapshot_->childrenOf(parent)) {
                     const auto* node = snapshot_->find(child);
-                    if (node != nullptr && node->entry.isFolder() && node->entry.name == dir) {
+                    if (node != nullptr && node->entry.isFolder() && node->folded == foldedDir) {
                         found = child;
                         break;
                     }
@@ -613,6 +693,7 @@ private:
         if (current_) {
             domain::secureWipe(current_->buffer);
             domain::secureWipe(current_->thumbSource);
+            current_->twins.clear(); // ChunkReader стирает свой кеш сам
         }
     }
 
@@ -621,9 +702,10 @@ private:
     VaultSession& session_;
     std::shared_ptr<const Sealer> sealer_;
     std::optional<EntryId> root_;
-    VaultSession::CatalogPtr snapshot_; // папки, существовавшие на начало импорта
+    VaultSession::CatalogPtr snapshot_; // каталог на начало импорта
     std::uint32_t chunkSize_;
-    std::map<std::string, KnownFolder> folders_; // "A/B/" -> папка этого импорта
+    std::map<std::string, KnownFolder> folders_;        // "a/b/" (folded) -> папка этого импорта
+    std::map<std::optional<EntryId>, FileIndex> files_; // папка -> ее файлы, для дубликатов
     std::optional<CurrentFile> current_;
     domain::ImportResult result_;
 };

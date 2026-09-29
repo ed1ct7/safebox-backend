@@ -60,6 +60,7 @@ struct ImportFailure {
 struct ImportResult {
     std::size_t imported = 0;
     std::size_t failed = 0;
+    std::size_t skipped = 0; // уже были в папке: то же имя без учета регистра и те же байты
     std::vector<ImportFailure> failures;
 };
 

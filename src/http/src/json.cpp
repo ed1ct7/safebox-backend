@@ -167,6 +167,7 @@ Json toJson(const domain::ImportResult& result) {
     return Json{
         {"imported", result.imported},
         {"failed", result.failed},
+        {"skipped", result.skipped},
         {"failures", std::move(failures)},
     };
 }
