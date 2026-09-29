@@ -1,4 +1,4 @@
-// /api/v1/entries (список любой записи, правка, перенос, удаление), /api/v1/folders
+// /api/v1/entries (список любой записи, правка, перенос, теги, удаление), /api/v1/folders
 #include "dto.hpp"
 
 namespace safebox::http {
@@ -50,21 +50,6 @@ namespace {
     return true;
 }
 
-// Необязательное строковое поле; неверный тип -> 400 уже отправлен.
-[[nodiscard]] bool readOptionalString(const Json& body, const char* field,
-                                      std::optional<std::string>& value, httplib::Response& res) {
-    const auto it = body.find(field);
-    if (it == body.end()) {
-        return true;
-    }
-    if (!it->is_string()) {
-        sendError(res, 400, "bad_request", std::string("Поле '") + field + "' должно быть строкой");
-        return false;
-    }
-    value = it->get<std::string>();
-    return true;
-}
-
 // Необязательное "resolutions": {"<id>": "keepBoth"|"replace"|"skip"}; иначе 400 уже отправлен.
 [[nodiscard]] bool readResolutions(const Json& body,
                                    std::unordered_map<domain::EntryId, app::ConflictPolicy>& out,
@@ -86,6 +71,54 @@ namespace {
             return false;
         }
         out[*id] = *policy;
+    }
+    return true;
+}
+
+// Необязательное "add": [{"tagId": число, "inherit"?: bool}]; иначе 400 уже отправлен.
+[[nodiscard]] bool readAdditions(const Json& body, std::vector<domain::TagAssignment>& out,
+                                 httplib::Response& res) {
+    const auto it = body.find("add");
+    if (it == body.end()) {
+        return true;
+    }
+    const auto invalid = [&] {
+        sendError(res, 400, "bad_request",
+                  "Поле 'add' должно быть списком объектов {tagId, inherit}");
+        return false;
+    };
+    if (!it->is_array()) {
+        return invalid();
+    }
+    for (const auto& item : *it) {
+        const auto id = item.find("tagId"); // не объект - end()
+        const auto inherit = item.find("inherit");
+        if (id == item.end() || !id->is_number_integer() || id->get<std::int64_t>() <= 0 ||
+            (inherit != item.end() && !inherit->is_boolean())) {
+            return invalid();
+        }
+        out.push_back({id->get<domain::TagId>(), inherit != item.end() && inherit->get<bool>()});
+    }
+    return true;
+}
+
+// Необязательное "remove": [числа]; иначе 400 уже отправлен.
+[[nodiscard]] bool readRemovals(const Json& body, std::vector<domain::TagId>& out,
+                                httplib::Response& res) {
+    const auto it = body.find("remove");
+    if (it == body.end()) {
+        return true;
+    }
+    if (!it->is_array()) {
+        sendError(res, 400, "bad_request", "Поле 'remove' должно быть списком идентификаторов");
+        return false;
+    }
+    for (const auto& value : *it) {
+        if (!value.is_number_integer() || value.get<std::int64_t>() <= 0) {
+            sendError(res, 400, "bad_request", "Некорректный идентификатор тега");
+            return false;
+        }
+        out.push_back(value.get<domain::TagId>());
     }
     return true;
 }
@@ -273,6 +306,34 @@ void registerEntriesApi(httplib::Server& server, ApiContext& ctx) {
                     }
                     sendJson(res, toJson(*moved));
                 });
+
+    server.Post("/api/v1/entries/tags", [&ctx](const httplib::Request& req,
+                                               httplib::Response& res) {
+        auto lease = requireApi(ctx, req, res);
+        if (!lease) {
+            return;
+        }
+        auto body = readJsonObject(req, res);
+        if (!body) {
+            return;
+        }
+        app::AssignTagsCmd cmd;
+        auto ids = readIds(*body, res);
+        if (!ids || !readAdditions(*body, cmd.add, res) || !readRemovals(*body, cmd.remove, res)) {
+            return;
+        }
+        if (!body->contains("add") && !body->contains("remove")) {
+            sendError(res, 400, "bad_request", "Укажите хотя бы одно поле: add или remove");
+            return;
+        }
+        cmd.ids = std::move(*ids);
+        auto updated = ctx.services.tags->assign(*lease, cmd);
+        if (!updated) {
+            sendError(res, updated.error());
+            return;
+        }
+        sendJson(res, Json{{"updated", *updated}});
+    });
 }
 
 } // namespace safebox::http

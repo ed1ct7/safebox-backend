@@ -233,17 +233,107 @@ public:
                                            domain::ByteSink& out) = 0;
 };
 
+// TagsService
+
+struct TagWithCount {
+    domain::Tag tag;
+    std::size_t count = 0; // записей, на которых тег стоит напрямую
+};
+
+struct CategoryWithTags {
+    domain::TagCategory category;
+    std::vector<TagWithCount> tags; // по имени
+};
+
+struct CreateTagCmd {
+    std::string category; // имя категории, не id
+    std::string name;
+    bool createCategory = false; // нет такой категории: создать вместо NotFound
+};
+
+struct CreatedTag {
+    domain::Tag tag;
+    bool created = false; // false - такой тег уже был, вернулся он
+};
+
+struct UpdateTagCmd {
+    std::optional<std::string> name;
+    std::optional<domain::CategoryId> categoryId; // перенос в другую категорию
+};
+
+struct RemovedTags {
+    std::size_t removedTags = 0;
+    std::size_t affectedEntries = 0; // записи, с которых теги сняты
+};
+
+struct AssignTagsCmd {
+    std::vector<domain::EntryId> ids;
+    std::vector<domain::TagAssignment> add; // тег уже стоит - обновляется inherit
+    std::vector<domain::TagId> remove;      // снимается раньше, чем ставится add
+};
+
+// Имена сравниваются без учета регистра ("ё" = "е"): "Eris" и "eris" в одной категории - один тег.
+// Любая правка тегов, которая касается записей, переписывает их одной транзакцией с самим тегом.
+class TagsService {
+public:
+    virtual ~TagsService() = default;
+
+    // Категории и теги в них по имени.
+    [[nodiscard]] virtual Result<std::vector<CategoryWithTags>> list(const Lease& lease) = 0;
+    // Дубль имени -> AlreadyExists, плохое имя -> InvalidArgument.
+    [[nodiscard]] virtual Result<domain::TagCategory> createCategory(const Lease& lease,
+                                                                     std::string_view name) = 0;
+    [[nodiscard]] virtual Result<CategoryWithTags>
+    renameCategory(const Lease& lease, domain::CategoryId id, std::string_view name) = 0;
+    // Категория и ее теги; теги снимаются со всех записей.
+    [[nodiscard]] virtual Result<RemovedTags> removeCategory(const Lease& lease,
+                                                             domain::CategoryId id) = 0;
+    // Нет категории и не createCategory -> NotFound; тег уже есть -> он же и created = false.
+    [[nodiscard]] virtual Result<CreatedTag> createTag(const Lease& lease,
+                                                       const CreateTagCmd& cmd) = 0;
+    // Переименование и/или перенос в другую категорию; такое имя уже есть там -> AlreadyExists.
+    [[nodiscard]] virtual Result<domain::Tag> updateTag(const Lease& lease, domain::TagId id,
+                                                        const UpdateTagCmd& cmd) = 0;
+    // Все присвоения from переходят на into (inherit = a || b), from удаляется -> сколько
+    // записей затронуто.
+    [[nodiscard]] virtual Result<std::size_t> mergeTag(const Lease& lease, domain::TagId from,
+                                                       domain::TagId into) = 0;
+    // -> сколько записей потеряло тег.
+    [[nodiscard]] virtual Result<std::size_t> removeTag(const Lease& lease, domain::TagId id) = 0;
+    // Одной транзакцией; неизвестный тег -> InvalidArgument, неизвестная запись -> NotFound,
+    // больше 1000 тегов на записи -> InvalidArgument, и ничего не меняется. -> записей изменено.
+    [[nodiscard]] virtual Result<std::size_t> assign(const Lease& lease,
+                                                     const AssignTagsCmd& cmd) = 0;
+};
+
 // SearchService
 
 inline constexpr std::size_t kDefaultSearchLimit = 200;
+
+// Как сочетаются выбранные теги.
+enum class TagMatch {
+    Categories, // И между категориями, ИЛИ внутри категории
+    All,        // все выбранные
+    Any,        // хотя бы один
+};
+
+struct SearchQuery {
+    std::string text; // может быть пустым, если заданы теги
+    std::vector<domain::TagId> tags;
+    TagMatch match = TagMatch::Categories;
+    std::optional<domain::EntryId> within;   // только потомки этой записи, ее самой в выдаче нет
+    std::size_t limit = kDefaultSearchLimit; // 0 - по умолчанию
+};
 
 class SearchService {
 public:
     virtual ~SearchService() = default;
 
-    // Без учёта регистра (кириллица включительно, "ё" = "е"); пустой запрос -> [].
+    // Текст - без учета регистра (кириллица включительно, "ё" = "е") в имени, иначе в описании;
+    // теги - по прямым и унаследованным. Пусто и то и другое -> []. Неизвестный тег ->
+    // InvalidArgument, неизвестный within -> NotFound.
     [[nodiscard]] virtual Result<std::vector<domain::SearchHit>>
-    search(const Lease& lease, std::string_view query, std::size_t limit) = 0;
+    search(const Lease& lease, const SearchQuery& query) = 0;
 };
 
 // Набор для транспорта
@@ -253,6 +343,7 @@ struct Services {
     std::shared_ptr<EntriesService> entries;
     std::shared_ptr<ImportExportService> importExport;
     std::shared_ptr<SearchService> search;
+    std::shared_ptr<TagsService> tags;
 };
 
 } // namespace safebox::app

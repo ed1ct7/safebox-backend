@@ -10,6 +10,7 @@ Services makeServices(Ports ports, AppConfig config) {
     services.entries = makeEntriesService(ports);
     services.importExport = makeImportExportService(ports);
     services.search = makeSearchService(ports);
+    services.tags = makeTagsService(ports);
     return services;
 }
 

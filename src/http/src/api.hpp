@@ -81,6 +81,9 @@ void replaceHeader(httplib::Response& res, const std::string& key, const std::st
 // Обязательное строковое поле; иначе 400 уже отправлен.
 [[nodiscard]] std::optional<std::string> requireString(const Json& body, const char* field,
                                                        httplib::Response& res);
+// Необязательное строковое поле: нет - value не тронут; неверный тип -> 400 уже отправлен.
+[[nodiscard]] bool readOptionalString(const Json& body, const char* field,
+                                      std::optional<std::string>& value, httplib::Response& res);
 [[nodiscard]] std::optional<domain::EntryId> parseId(std::string_view text) noexcept;
 // "keepBoth" | "replace" | "skip"
 [[nodiscard]] std::optional<app::ConflictPolicy>
@@ -113,5 +116,6 @@ void registerEntriesApi(httplib::Server& server, ApiContext& ctx);
 void registerImportApi(httplib::Server& server, ApiContext& ctx);
 void registerMediaApi(httplib::Server& server, ApiContext& ctx);
 void registerSearchApi(httplib::Server& server, ApiContext& ctx);
+void registerTagsApi(httplib::Server& server, ApiContext& ctx);
 
 } // namespace safebox::http

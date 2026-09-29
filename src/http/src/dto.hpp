@@ -19,6 +19,9 @@ namespace safebox::http {
 [[nodiscard]] Json toJson(const app::SafeInfo& info);
 [[nodiscard]] Json toJson(const app::PublicStatus& status);
 [[nodiscard]] Json toJson(const domain::SearchHit& hit);
+[[nodiscard]] Json toJson(const domain::Tag& tag);
+[[nodiscard]] Json toJson(const app::CategoryWithTags& category);
+[[nodiscard]] Json toJson(const app::RemovedTags& removed);
 [[nodiscard]] Json toJson(const app::ImportPlan& plan);
 [[nodiscard]] Json toJson(const domain::ImportResult& result);
 

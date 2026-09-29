@@ -15,6 +15,7 @@ add_library(safebox-http STATIC
     src/import_api.cpp
     src/media_api.cpp
     src/search_api.cpp
+    src/tags_api.cpp
 )
 
 target_include_directories(safebox-http

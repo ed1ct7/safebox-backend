@@ -95,6 +95,7 @@ void registerRoutes(httplib::Server& server, ApiContext& ctx) {
     registerImportApi(server, ctx);
     registerMediaApi(server, ctx);
     registerSearchApi(server, ctx);
+    registerTagsApi(server, ctx);
 
     // последним: все, что не API, - фронтенд
     server.Get(".*", [&ctx](const httplib::Request& req, httplib::Response& res) {

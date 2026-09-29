@@ -122,7 +122,7 @@ TEST_CASE("search finds names anywhere, case-insensitively", "[search][UF-8]") {
                               {"notes.txt", "n"}})
                 .imported == 4);
 
-    auto hits = f.services.search->search(f.lease(s), "ёлка на пляже", 0);
+    auto hits = f.services.search->search(f.lease(s), {.text = "ёлка на пляже"});
     REQUIRE(hits.has_value());
     REQUIRE(hits->size() == 1);
     CHECK((*hits)[0].entry.name == "Ёлка на ПЛЯЖЕ.jpg");
@@ -130,38 +130,38 @@ TEST_CASE("search finds names anywhere, case-insensitively", "[search][UF-8]") {
     CHECK((*hits)[0].path[0].name == "Отпуск");
     CHECK((*hits)[0].path[1].name == "Море");
 
-    auto yo = f.services.search->search(f.lease(s), "ЕЛКА", 0); // "е" находит "ё"
+    auto yo = f.services.search->search(f.lease(s), {.text = "ЕЛКА"}); // "е" находит "ё"
     REQUIRE(yo.has_value());
     CHECK(yo->size() == 1);
 
-    auto latin = f.services.search->search(f.lease(s), "report.pdf", 0);
+    auto latin = f.services.search->search(f.lease(s), {.text = "report.pdf"});
     REQUIRE(latin.has_value());
     REQUIRE(latin->size() == 1);
     CHECK((*latin)[0].entry.meta.mime == "application/pdf");
 
-    auto folders =
-        f.services.search->search(f.lease(s), "o", 0); // латинская: Work, Report.PDF, notes.txt
+    // латинская: Work, Report.PDF, notes.txt
+    auto folders = f.services.search->search(f.lease(s), {.text = "o"});
     REQUIRE(folders.has_value());
     REQUIRE(folders->size() == 3);
     CHECK((*folders)[0].entry.name == "Work"); // папки первыми
 
-    auto limited = f.services.search->search(f.lease(s), "t", 2);
+    auto limited = f.services.search->search(f.lease(s), {.text = "t", .limit = 2});
     REQUIRE(limited.has_value());
     CHECK(limited->size() == 2);
 
-    auto blank = f.services.search->search(f.lease(s), "   ", 0);
+    auto blank = f.services.search->search(f.lease(s), {.text = "   "});
     REQUIRE(blank.has_value());
     CHECK(blank->empty());
 
     // кэш имен обновляется после импорта и переименования
     REQUIRE(f.importFiles(s, {{"new.txt", "z"}}).imported == 1);
-    auto fresh = f.services.search->search(f.lease(s), "new", 0);
+    auto fresh = f.services.search->search(f.lease(s), {.text = "new"});
     REQUIRE(fresh.has_value());
     CHECK(fresh->size() == 1);
     REQUIRE(f.services.entries
                 ->update(f.lease(s), f.entryNamed(s, "new.txt").id, {.name = "renamed.txt"})
                 .has_value());
-    auto stale = f.services.search->search(f.lease(s), "new", 0);
+    auto stale = f.services.search->search(f.lease(s), {.text = "new"});
     REQUIRE(stale.has_value());
     CHECK(stale->empty());
 }

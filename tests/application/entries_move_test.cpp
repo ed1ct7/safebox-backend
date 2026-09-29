@@ -217,7 +217,7 @@ TEST_CASE("any entry can be a parent: attachments, breadcrumbs, folder tree",
     CHECK((*tree)[0].name == "Plain");
 
     // поиск видит вложенное и показывает путь через фото
-    auto hits = f.services.search->search(f.lease(s), "x.txt", 0);
+    auto hits = f.services.search->search(f.lease(s), {.text = "x.txt"});
     REQUIRE(hits.has_value());
     REQUIRE(hits->size() == 1);
     REQUIRE((*hits)[0].path.size() == 3);

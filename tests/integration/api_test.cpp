@@ -495,6 +495,174 @@ TEST_CASE("organizing over HTTP: description, move with conflicts, attachments, 
           "заметка.txt");
 }
 
+TEST_CASE("tags over HTTP: create, assign, filter, manage, survive a reopen",
+          "[integration][UF-16][UF-17][UF-18]") {
+    test::TempDir dir;
+    Stack stack(dir.path());
+    auto c = stack.client();
+    const auto session =
+        post(c, "/api/v1/safe/create",
+             {{"path", "Теги"}, {"password", "пароль-1"}, {"confirm", "пароль-1"}}, 201);
+    auto token = session["token"].get<std::string>();
+    httplib::UploadFormDataItems items = {
+        {"file", makePng(64, 48), "Отпуск/Море/фото.png", "image/png"},
+        {"file", "заметка", "Отпуск/заметка.txt", "text/plain"},
+        {"file", "отчет", "Работа/отчёт.txt", "text/plain"},
+        {"file", "readme", "readme.txt", "text/plain"},
+    };
+    auto imported = c.Post("/api/v1/import", bearer(token), items);
+    REQUIRE(imported);
+    REQUIRE(imported->status == 200);
+
+    const auto idOf = [](const Json& entry) { return entry["id"].get<std::int64_t>(); };
+    const auto listing = [&](const Json& parent) {
+        return get(c, "/api/v1/entries?parentId=" + std::to_string(idOf(parent)), token);
+    };
+    const auto root = get(c, "/api/v1/entries", token);
+    const auto trip = byName(root, "Отпуск");
+    const auto work = byName(root, "Работа");
+    const auto readme = byName(root, "readme.txt");
+    const auto sea = byName(listing(trip), "Море");
+    const auto note = byName(listing(trip), "заметка.txt");
+    const auto photo = byName(listing(sea), "фото.png");
+    const auto report = byName(listing(work), "отчёт.txt");
+
+    const auto send = [&](const char* method, const std::string& path, const Json& body,
+                          int expected) {
+        const auto headers = bearer(token);
+        auto r = std::string(method) == "PATCH"
+                     ? c.Patch(path, headers, body.dump(), "application/json")
+                     : c.Delete(path, headers);
+        REQUIRE(r);
+        INFO(method << " " << path << " -> " << r->body);
+        REQUIRE(r->status == expected);
+        return Json::parse(r->body);
+    };
+    const auto assign = [&](const Json& body) {
+        return post(c, "/api/v1/entries/tags", body, 200, bearer(token))["updated"];
+    };
+    const auto found = [&](const std::string& query) {
+        std::vector<std::string> names;
+        for (const auto& hit : get(c, "/api/v1/search?" + query, token)["results"]) {
+            names.push_back(hit["entry"]["name"].get<std::string>());
+        }
+        return names;
+    };
+    using Names = std::vector<std::string>;
+
+    // категории и теги: дубль без учета регистра, тег в несуществующей категории
+    const auto people = post(c, "/api/v1/tags/categories", {{"name", "Люди"}}, 201, bearer(token));
+    CHECK(people["tags"].is_array());
+    CHECK(post(c, "/api/v1/tags/categories", {{"name", "люди"}}, 409,
+               bearer(token))["error"]["code"] == "already_exists");
+    const auto peopleId = idOf(people);
+    const auto anna =
+        post(c, "/api/v1/tags", {{"category", "Люди"}, {"name", "Анна"}}, 201, bearer(token));
+    CHECK(anna["categoryId"] == peopleId);
+    const auto sameAnna =
+        post(c, "/api/v1/tags", {{"category", "люди"}, {"name", "АННА"}}, 200, bearer(token));
+    CHECK(idOf(sameAnna) == idOf(anna));
+    CHECK(post(c, "/api/v1/tags", {{"category", "Место"}, {"name", "Крым"}}, 404,
+               bearer(token))["error"]["code"] == "not_found");
+    post(c, "/api/v1/tags", {{"category", "Люди"}, {"name", "a:b"}}, 422, bearer(token));
+    const auto crimea =
+        post(c, "/api/v1/tags", {{"category", "Место"}, {"name", "Крым"}, {"createCategory", true}},
+             201, bearer(token));
+    const auto sochi =
+        post(c, "/api/v1/tags", {{"category", "Место"}, {"name", "Сочи"}}, 201, bearer(token));
+    const auto aniya =
+        post(c, "/api/v1/tags", {{"category", "Люди"}, {"name", "Аня"}}, 201, bearer(token));
+
+    // присвоение: Крым отпуску на все вложенное, остальное - точечно
+    CHECK(assign({{"ids", {idOf(trip)}},
+                  {"add", {{{"tagId", idOf(crimea)}, {"inherit", true}}}}}) == 1);
+    CHECK(assign({{"ids", {idOf(note), idOf(report)}}, {"add", {{{"tagId", idOf(anna)}}}}}) == 2);
+    CHECK(assign({{"ids", {idOf(readme)}}, {"add", {{{"tagId", idOf(aniya)}}}}}) == 1);
+    CHECK(assign({{"ids", {idOf(photo)}}, {"add", {{{"tagId", idOf(sochi)}}}}}) == 1);
+    post(c, "/api/v1/entries/tags", {{"ids", {idOf(photo)}}, {"add", {{{"tagId", 9999}}}}}, 422,
+         bearer(token));
+    post(c, "/api/v1/entries/tags", {{"ids", {424242}}, {"add", {{{"tagId", idOf(sochi)}}}}}, 404,
+         bearer(token));
+
+    const auto seaAgain = byName(listing(trip), "Море");
+    CHECK(seaAgain["tags"].empty());
+    CHECK(seaAgain["inheritedTags"] ==
+          Json::parse(R"([{"tagId":)" + std::to_string(idOf(crimea)) + R"(,"fromId":)" +
+                      std::to_string(idOf(trip)) + "}]"));
+    CHECK(byName(listing(trip), "заметка.txt")["tags"][0] ==
+          Json({{"tagId", idOf(anna)}, {"inherit", false}}));
+
+    // фильтр: унаследованные теги, режимы, область, текст
+    const auto crimeaId = std::to_string(idOf(crimea));
+    const auto annaId = std::to_string(idOf(anna));
+    const auto sochiId = std::to_string(idOf(sochi));
+    CHECK(found("tags=" + crimeaId) == Names{"Море", "Отпуск", "заметка.txt", "фото.png"});
+    CHECK(found("tags=" + annaId + "," + crimeaId) == Names{"заметка.txt"});
+    CHECK(found("match=all&tags=" + annaId + "," + crimeaId) == Names{"заметка.txt"});
+    CHECK(found("match=any&tags=" + annaId + "," + sochiId) ==
+          Names{"заметка.txt", "отчёт.txt", "фото.png"});
+    CHECK(found("tags=" + annaId + "&within=" + std::to_string(idOf(trip))) ==
+          Names{"заметка.txt"});
+    CHECK(found("q=%D0%B7%D0%B0%D0%BC%D0%B5%D1%82%D0%BA%D0%B0&tags=" + annaId) ==
+          Names{"заметка.txt"}); // "заметка"
+    CHECK(found("tags=" + sochiId + "&within=" + std::to_string(idOf(work))).empty());
+    const auto unknown = c.Get("/api/v1/search?tags=9999", bearer(token));
+    REQUIRE(unknown);
+    CHECK(unknown->status == 422);
+    const auto hit = get(c, "/api/v1/search?q=%D0%B7%D0%B0%D0%BC%D0%B5%D1%82%D0%BA%D0%B0", token);
+    CHECK(hit["results"][0]["matchedIn"] == "name");
+
+    // управление: переименование в занятое имя -> слияние; перенос; удаление тега
+    CHECK(send("PATCH", "/api/v1/tags/" + annaId, {{"name", " аня "}}, 409)["error"]["code"] ==
+          "already_exists");
+    CHECK(send("PATCH", "/api/v1/tags/" + annaId, {{"name", "Анна К."}}, 200)["name"] == "Анна К.");
+    const auto merged = post(c, "/api/v1/tags/" + std::to_string(idOf(aniya)) + "/merge",
+                             {{"into", idOf(anna)}}, 200, bearer(token));
+    CHECK(merged["affectedEntries"] == 1);
+    CHECK(get(c, "/api/v1/entries/" + std::to_string(idOf(readme)), token)["tags"][0]["tagId"] ==
+          idOf(anna));
+    const auto placesId = crimea["categoryId"].get<std::int64_t>();
+    CHECK(send("PATCH", "/api/v1/tags/categories/" + std::to_string(placesId), {{"name", "Места"}},
+               200)["name"] == "Места");
+    CHECK(send("PATCH", "/api/v1/tags/" + sochiId, {{"categoryId", peopleId}}, 200)["categoryId"] ==
+          peopleId);
+    CHECK(send("DELETE", "/api/v1/tags/" + sochiId, {}, 200)["affectedEntries"] == 1);
+    CHECK(get(c, "/api/v1/entries/" + std::to_string(idOf(photo)), token)["tags"].empty());
+
+    const auto checkCatalog = [&] {
+        const auto all = get(c, "/api/v1/tags", token)["categories"];
+        REQUIRE(all.size() == 2);
+        CHECK(all[0]["name"] == "Люди");
+        REQUIRE(all[0]["tags"].size() == 1);
+        CHECK(all[0]["tags"][0]["name"] == "Анна К.");
+        CHECK(all[0]["tags"][0]["count"] == 3); // заметка, отчёт, readme
+        CHECK(all[1]["name"] == "Места");
+        REQUIRE(all[1]["tags"].size() == 1);
+        CHECK(all[1]["tags"][0]["name"] == "Крым");
+        CHECK(all[1]["tags"][0]["count"] == 1);
+    };
+    checkCatalog();
+
+    // блокировка и повторный вход: теги, счетчики и фильтр на месте
+    post(c, "/api/v1/safe/lock", Json::object(), 204, bearer(token));
+    const auto again = post(c, "/api/v1/safe/unlock",
+                            {{"path", session["safe"]["path"]}, {"password", "пароль-1"}}, 200);
+    token = again["token"].get<std::string>();
+    checkCatalog();
+    CHECK(found("tags=" + crimeaId) == Names{"Море", "Отпуск", "заметка.txt", "фото.png"});
+    CHECK(found("tags=" + annaId + "," + crimeaId) == Names{"заметка.txt"});
+
+    // категория уходит вместе с тегами, и с записей тоже, унаследованное в том числе
+    const auto removed =
+        send("DELETE", "/api/v1/tags/categories/" + std::to_string(placesId), {}, 200);
+    CHECK(removed == Json({{"removedTags", 1}, {"affectedEntries", 1}}));
+    CHECK(byName(listing(trip), "Море")["inheritedTags"].empty());
+    CHECK(byName(get(c, "/api/v1/entries", token), "Отпуск")["tags"].empty());
+    const auto gone = c.Get("/api/v1/search?tags=" + crimeaId, bearer(token));
+    REQUIRE(gone);
+    CHECK(gone->status == 422);
+}
+
 TEST_CASE("re-importing a folder over HTTP: plan, then a manifest with the decisions",
           "[integration][UF-15]") {
     test::TempDir dir;

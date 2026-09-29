@@ -586,11 +586,264 @@ TEST_CASE("search passes the query and returns hits with paths", "[http][search]
     HttpFixture f;
     auto r = f.api("GET", "/api/v1/search?q=%D0%BC%D0%BE%D1%80%D0%B5&limit=5");
     REQUIRE(r.status == 200);
-    CHECK(f.fakes.search->lastQuery == "море");
-    CHECK(f.fakes.search->lastLimit == 5);
+    CHECK(f.fakes.search->lastQuery.text == "море");
+    CHECK(f.fakes.search->lastQuery.limit == 5);
     CHECK(r.json()["results"][0]["entry"]["name"] == "море.jpg");
     CHECK(r.json()["results"][0]["path"][0]["name"] == "Отпуск");
     CHECK(f.api("GET", "/api/v1/search?q=a&limit=zero").status == 400);
+}
+
+TEST_CASE("search takes tags, match mode and scope", "[http][search][UF-18]") {
+    HttpFixture f;
+    auto r = f.api("GET", "/api/v1/search?q=a&tags=1,2,3&match=any&within=7&limit=9");
+    REQUIRE(r.status == 200);
+    const auto& query = f.fakes.search->lastQuery;
+    CHECK(query.text == "a");
+    CHECK(query.tags == std::vector<domain::TagId>{1, 2, 3});
+    CHECK(query.match == app::TagMatch::Any);
+    CHECK(query.within == 7);
+    CHECK(query.limit == 9);
+    CHECK(r.json()["query"] == "a");
+    CHECK(r.json()["results"].size() == 1);
+
+    // по умолчанию: без тегов, И между категориями, весь сейф
+    f.api("GET", "/api/v1/search?q=a");
+    CHECK(query.tags.empty());
+    CHECK(query.match == app::TagMatch::Categories);
+    CHECK_FALSE(query.within.has_value());
+    CHECK(query.limit == app::kDefaultSearchLimit);
+    // одни теги, без текста; запятая может прийти закодированной
+    auto tagsOnly = f.api("GET", "/api/v1/search?tags=5%2C6&match=all");
+    CHECK(tagsOnly.status == 200);
+    CHECK(tagsOnly.json()["query"] == "");
+    CHECK(query.text.empty());
+    CHECK(query.tags == std::vector<domain::TagId>{5, 6});
+    CHECK(query.match == app::TagMatch::All);
+    f.api("GET", "/api/v1/search?tags=5&match=categories&within=");
+    CHECK(query.match == app::TagMatch::Categories);
+    CHECK_FALSE(query.within.has_value());
+
+    // кривые параметры не доходят до сервиса
+    f.fakes.search->lastQuery.text = "untouched";
+    for (const char* bad :
+         {"tags=1,,2", "tags=1,", "tags=,1", "tags=a", "tags=0", "tags=-1", "tags=1.5",
+          "match=some", "match=ALL", "within=abc", "within=0", "within=-3", "limit=0"}) {
+        INFO(bad);
+        auto refused = f.api("GET", std::string("/api/v1/search?q=a&") + bad);
+        CHECK(refused.status == 400);
+        CHECK(refused.errorCode() == "bad_request");
+    }
+    CHECK(query.text == "untouched");
+
+    f.fakes.search->error = domain::Error{Code::InvalidArgument, "Неизвестный тег"};
+    auto unknownTag = f.api("GET", "/api/v1/search?tags=999");
+    CHECK(unknownTag.status == 422);
+    CHECK(unknownTag.errorCode() == "invalid_argument");
+    f.fakes.search->error = domain::Error{Code::NotFound, "Объект не найден"};
+    CHECK(f.api("GET", "/api/v1/search?q=a&within=999").status == 404);
+}
+
+TEST_CASE("GET /tags answers with the categories, their tags and the counts", "[http][tags]") {
+    HttpFixture f;
+    auto r = f.api("GET", "/api/v1/tags");
+    REQUIRE(r.status == 200);
+    CHECK(r.json() == http::Json::parse(R"({"categories":[{"id":1,"name":"Люди","tags":[)"
+                                        R"({"id":10,"categoryId":1,"name":"Ирис","count":2},)"
+                                        R"({"id":11,"categoryId":1,"name":"Рокси","count":0}]},)"
+                                        R"({"id":2,"name":"Язык","tags":[]}]})"));
+
+    f.fakes.tags->categories.clear();
+    CHECK(f.api("GET", "/api/v1/tags").json() == http::Json({{"categories", http::Json::array()}}));
+    CHECK(f.request("GET", "/api/v1/tags").status == 401);
+    f.fakes.tags->error = domain::Error{Code::Locked, "Сейф заблокирован"};
+    CHECK(f.api("GET", "/api/v1/tags").status == 401);
+}
+
+TEST_CASE("category endpoints: create, rename, remove", "[http][tags][UF-17]") {
+    HttpFixture f;
+    auto created = f.api("POST", "/api/v1/tags/categories", R"({"name":"Новая"})");
+    REQUIRE(created.status == 201);
+    CHECK(created.json() ==
+          http::Json({{"id", 3}, {"name", "Новая"}, {"tags", http::Json::array()}}));
+    CHECK(f.fakes.tags->lastName == "Новая");
+
+    auto renamed = f.api("PATCH", "/api/v1/tags/categories/1", R"({"name":"Персонажи"})");
+    REQUIRE(renamed.status == 200);
+    CHECK(renamed.json()["id"] == 1);
+    CHECK(renamed.json()["name"] == "Персонажи");
+    REQUIRE(renamed.json()["tags"].size() == 2); // с тегами и счетчиками
+    CHECK(renamed.json()["tags"][0]["count"] == 2);
+    CHECK(f.fakes.tags->lastId == 1);
+    CHECK(f.fakes.tags->lastName == "Персонажи");
+
+    auto removed = f.api("DELETE", "/api/v1/tags/categories/2");
+    REQUIRE(removed.status == 200);
+    CHECK(removed.json() == http::Json({{"removedTags", 4}, {"affectedEntries", 7}}));
+    CHECK(f.fakes.tags->lastId == 2);
+
+    // не то, что просили
+    f.fakes.tags->lastName = "untouched";
+    CHECK(f.api("POST", "/api/v1/tags/categories", R"({})").status == 400);
+    CHECK(f.api("POST", "/api/v1/tags/categories", R"({"name":5})").status == 400);
+    CHECK(f.api("POST", "/api/v1/tags/categories", R"([])").status == 400);
+    CHECK(f.api("PATCH", "/api/v1/tags/categories/1", R"({})").status == 400);
+    CHECK(f.api("PATCH", "/api/v1/tags/categories/abc", R"({"name":"x"})").status == 400);
+    CHECK(f.api("PATCH", "/api/v1/tags/categories/0", R"({"name":"x"})").status == 400);
+    CHECK(f.api("DELETE", "/api/v1/tags/categories/abc").status == 400);
+    CHECK(f.fakes.tags->lastName == "untouched");
+
+    // ответы сервиса: дубль, нет категории, плохое имя
+    f.fakes.tags->error =
+        domain::Error{Code::AlreadyExists, "Категория с таким названием уже есть"};
+    auto duplicate = f.api("POST", "/api/v1/tags/categories", R"({"name":"Люди"})");
+    CHECK(duplicate.status == 409);
+    CHECK(duplicate.errorCode() == "already_exists");
+    CHECK(f.api("PATCH", "/api/v1/tags/categories/2", R"({"name":"Люди"})").status == 409);
+    f.fakes.tags->error = domain::Error{Code::NotFound, "Категория не найдена"};
+    CHECK(f.api("PATCH", "/api/v1/tags/categories/99", R"({"name":"x"})").status == 404);
+    CHECK(f.api("DELETE", "/api/v1/tags/categories/99").status == 404);
+    f.fakes.tags->error = domain::Error{Code::InvalidArgument, "Название не может быть пустым"};
+    auto empty = f.api("POST", "/api/v1/tags/categories", R"({"name":""})");
+    CHECK(empty.status == 422);
+    CHECK(empty.errorCode() == "invalid_argument");
+}
+
+TEST_CASE("POST /tags creates a tag: 201, or 200 when it was there", "[http][tags][UF-16]") {
+    HttpFixture f;
+    auto created = f.api("POST", "/api/v1/tags", R"({"category":"Люди","name":"Ирис"})");
+    REQUIRE(created.status == 201);
+    CHECK(created.json() == http::Json({{"id", 12}, {"categoryId", 1}, {"name", "Ирис"}}));
+    REQUIRE(f.fakes.tags->lastCreate.has_value());
+    CHECK(f.fakes.tags->lastCreate->category == "Люди");
+    CHECK(f.fakes.tags->lastCreate->name == "Ирис");
+    CHECK_FALSE(f.fakes.tags->lastCreate->createCategory);
+
+    f.api("POST", "/api/v1/tags", R"({"category":"Новая","name":"Тег","createCategory":true})");
+    CHECK(f.fakes.tags->lastCreate->createCategory);
+    f.api("POST", "/api/v1/tags", R"({"category":"Новая","name":"Тег","createCategory":false})");
+    CHECK_FALSE(f.fakes.tags->lastCreate->createCategory);
+
+    f.fakes.tags->tagCreated = false;
+    auto existing = f.api("POST", "/api/v1/tags", R"({"category":"Люди","name":"ирис"})");
+    CHECK(existing.status == 200);
+    CHECK(existing.json()["id"] == 12);
+
+    f.fakes.tags->lastCreate.reset();
+    for (const char* bad : {R"({})", R"({"category":"Люди"})", R"({"name":"Ирис"})",
+                            R"({"category":1,"name":"Ирис"})", R"({"category":"Люди","name":null})",
+                            R"({"category":"Люди","name":"Ирис","createCategory":"yes"})"}) {
+        INFO(bad);
+        CHECK(f.api("POST", "/api/v1/tags", bad).status == 400);
+    }
+    CHECK_FALSE(f.fakes.tags->lastCreate.has_value());
+
+    f.fakes.tags->error = domain::Error{Code::NotFound, "Категория не найдена"};
+    auto noCategory = f.api("POST", "/api/v1/tags", R"({"category":"Нет","name":"Тег"})");
+    CHECK(noCategory.status == 404);
+    CHECK(noCategory.errorCode() == "not_found");
+    f.fakes.tags->error =
+        domain::Error{Code::InvalidArgument, "Название не может содержать двоеточие"};
+    CHECK(f.api("POST", "/api/v1/tags", R"({"category":"Люди","name":"a:b"})").status == 422);
+}
+
+TEST_CASE("tag endpoints: update, merge, remove", "[http][tags][UF-17]") {
+    HttpFixture f;
+    auto renamed = f.api("PATCH", "/api/v1/tags/10", R"({"name":"Ирис Грейрат"})");
+    REQUIRE(renamed.status == 200);
+    CHECK(renamed.json() == http::Json({{"id", 10}, {"categoryId", 1}, {"name", "Ирис Грейрат"}}));
+    CHECK(f.fakes.tags->lastId == 10);
+    CHECK(f.fakes.tags->lastUpdate->name == "Ирис Грейрат");
+    CHECK_FALSE(f.fakes.tags->lastUpdate->categoryId.has_value());
+
+    auto moved = f.api("PATCH", "/api/v1/tags/10", R"({"categoryId":2})");
+    REQUIRE(moved.status == 200);
+    CHECK(moved.json()["categoryId"] == 2);
+    CHECK_FALSE(f.fakes.tags->lastUpdate->name.has_value());
+    f.api("PATCH", "/api/v1/tags/10", R"({"name":"Ирис","categoryId":2})");
+    CHECK(f.fakes.tags->lastUpdate->name == "Ирис");
+    CHECK(f.fakes.tags->lastUpdate->categoryId == 2);
+
+    auto merged = f.api("POST", "/api/v1/tags/10/merge", R"({"into":11})");
+    REQUIRE(merged.status == 200);
+    CHECK(merged.json() == http::Json({{"affectedEntries", 5}}));
+    CHECK(f.fakes.tags->lastId == 10);
+    CHECK(f.fakes.tags->lastInto == 11);
+
+    auto removed = f.api("DELETE", "/api/v1/tags/10");
+    REQUIRE(removed.status == 200);
+    CHECK(removed.json() == http::Json({{"affectedEntries", 6}}));
+
+    f.fakes.tags->lastUpdate.reset();
+    f.fakes.tags->lastId = 0;
+    for (const char* bad :
+         {R"({})", R"({"name":5})", R"({"categoryId":"2"})", R"({"categoryId":0})",
+          R"({"categoryId":1.5})", R"({"categoryId":null})"}) {
+        INFO(bad);
+        CHECK(f.api("PATCH", "/api/v1/tags/10", bad).status == 400);
+    }
+    CHECK(f.api("PATCH", "/api/v1/tags/abc", R"({"name":"x"})").status == 400);
+    for (const char* bad : {R"({})", R"({"into":"11"})", R"({"into":0})", R"({"into":null})"}) {
+        INFO(bad);
+        CHECK(f.api("POST", "/api/v1/tags/10/merge", bad).status == 400);
+    }
+    CHECK(f.api("POST", "/api/v1/tags/abc/merge", R"({"into":1})").status == 400);
+    CHECK(f.api("DELETE", "/api/v1/tags/-1").status == 400);
+    CHECK_FALSE(f.fakes.tags->lastUpdate.has_value());
+    CHECK(f.fakes.tags->lastId == 0);
+
+    f.fakes.tags->error = domain::Error{Code::AlreadyExists, "Такой тег в этой категории уже есть"};
+    CHECK(f.api("PATCH", "/api/v1/tags/10", R"({"name":"Рокси"})").status == 409);
+    f.fakes.tags->error = domain::Error{Code::NotFound, "Тег не найден"};
+    CHECK(f.api("PATCH", "/api/v1/tags/99", R"({"name":"x"})").status == 404);
+    CHECK(f.api("POST", "/api/v1/tags/99/merge", R"({"into":1})").status == 404);
+    CHECK(f.api("DELETE", "/api/v1/tags/99").status == 404);
+    f.fakes.tags->error = domain::Error{Code::InvalidArgument, "Нельзя слить тег с самим собой"};
+    CHECK(f.api("POST", "/api/v1/tags/10/merge", R"({"into":10})").status == 422);
+}
+
+TEST_CASE("POST /entries/tags adds and removes tags on several entries", "[http][tags][UF-16]") {
+    HttpFixture f;
+    auto r =
+        f.api("POST", "/api/v1/entries/tags",
+              R"({"ids":[2,3],"add":[{"tagId":10,"inherit":true},{"tagId":11}],"remove":[12]})");
+    REQUIRE(r.status == 200);
+    CHECK(r.json() == http::Json({{"updated", 3}}));
+    REQUIRE(f.fakes.tags->lastAssign.has_value());
+    const auto& cmd = *f.fakes.tags->lastAssign;
+    CHECK(cmd.ids == std::vector<domain::EntryId>{2, 3});
+    CHECK(cmd.add == std::vector<domain::TagAssignment>{{10, true}, {11, false}});
+    CHECK(cmd.remove == std::vector<domain::TagId>{12});
+
+    // одно из двух достаточно
+    CHECK(f.api("POST", "/api/v1/entries/tags", R"({"ids":[2],"remove":[10]})").status == 200);
+    CHECK(f.fakes.tags->lastAssign->add.empty());
+    CHECK(f.api("POST", "/api/v1/entries/tags", R"({"ids":[2],"add":[]})").status == 200);
+    CHECK(f.fakes.tags->lastAssign->remove.empty());
+
+    f.fakes.tags->lastAssign.reset();
+    for (const char* bad :
+         {R"({"ids":[2]})", R"({"add":[{"tagId":1}]})", R"({"ids":"2","add":[]})",
+          R"({"ids":[0],"add":[]})", R"({"ids":[2],"add":{"tagId":1}})", R"({"ids":[2],"add":[1]})",
+          R"({"ids":[2],"add":[{}]})", R"({"ids":[2],"add":[{"tagId":0}]})",
+          R"({"ids":[2],"add":[{"tagId":"1"}]})",
+          R"({"ids":[2],"add":[{"tagId":1,"inherit":"yes"}]})", R"({"ids":[2],"remove":5})",
+          R"({"ids":[2],"remove":["1"]})", R"({"ids":[2],"remove":[0]})"}) {
+        INFO(bad);
+        auto refused = f.api("POST", "/api/v1/entries/tags", bad);
+        CHECK(refused.status == 400);
+        CHECK(refused.errorCode() == "bad_request");
+    }
+    CHECK_FALSE(f.fakes.tags->lastAssign.has_value()); // мусор до сервиса не доходит
+    CHECK(f.request("POST", "/api/v1/entries/tags", {"Content-Type: application/json"},
+                    R"({"ids":[2],"add":[]})")
+              .status == 401);
+
+    f.fakes.tags->error = domain::Error{Code::InvalidArgument, "Неизвестный тег"};
+    CHECK(f.api("POST", "/api/v1/entries/tags", R"({"ids":[2],"add":[{"tagId":99}]})").status ==
+          422);
+    f.fakes.tags->error = domain::Error{Code::NotFound, "Объект не найден"};
+    CHECK(f.api("POST", "/api/v1/entries/tags", R"({"ids":[99],"add":[{"tagId":1}]})").status ==
+          404);
 }
 
 TEST_CASE("import streams multipart parts into the import session", "[http][import]") {

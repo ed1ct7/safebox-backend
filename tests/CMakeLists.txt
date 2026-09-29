@@ -32,6 +32,8 @@ sbx_add_test_executable(safebox-app-tests
     application/entries_move_test.cpp
     application/format_test.cpp
     application/catalog_test.cpp
+    application/tags_test.cpp
+    application/tag_filter_test.cpp
     application/rules_test.cpp
     application/link_preview_test.cpp
 )

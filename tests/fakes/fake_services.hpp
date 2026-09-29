@@ -304,10 +304,12 @@ public:
 
 class FakeSearchService final : public app::SearchService {
 public:
-    app::Result<std::vector<domain::SearchHit>> search(const app::Lease&, std::string_view query,
-                                                       std::size_t limit) override {
-        lastQuery = std::string(query);
-        lastLimit = limit;
+    app::Result<std::vector<domain::SearchHit>> search(const app::Lease&,
+                                                       const app::SearchQuery& query) override {
+        lastQuery = query;
+        if (error) {
+            return std::unexpected(*error);
+        }
         domain::SearchHit hit;
         hit.entry = makeEntry(2, 1, domain::Kind::Photo, "море.jpg");
         hit.path = {{1, "Отпуск"}};
@@ -316,8 +318,107 @@ public:
     }
 
     domain::MatchedIn matchedIn = domain::MatchedIn::None;
-    std::string lastQuery;
-    std::size_t lastLimit = 0;
+    std::optional<domain::Error> error;
+    app::SearchQuery lastQuery;
+};
+
+// Отвечает заготовками и запоминает аргументы; error проваливает любую операцию.
+class FakeTagsService final : public app::TagsService {
+public:
+    FakeTagsService() {
+        categories = {{{1, "Люди"}, {{{10, 1, "Ирис"}, 2}, {{11, 1, "Рокси"}, 0}}},
+                      {{2, "Язык"}, {}}};
+    }
+
+    app::Result<std::vector<app::CategoryWithTags>> list(const app::Lease&) override {
+        if (error) {
+            return std::unexpected(*error);
+        }
+        return categories;
+    }
+
+    app::Result<domain::TagCategory> createCategory(const app::Lease&,
+                                                    std::string_view name) override {
+        if (error) {
+            return std::unexpected(*error);
+        }
+        lastName = std::string(name);
+        return domain::TagCategory{3, std::string(name)};
+    }
+
+    app::Result<app::CategoryWithTags> renameCategory(const app::Lease&, domain::CategoryId id,
+                                                      std::string_view name) override {
+        if (error) {
+            return std::unexpected(*error);
+        }
+        lastId = id;
+        lastName = std::string(name);
+        return app::CategoryWithTags{{id, std::string(name)}, categories[0].tags};
+    }
+
+    app::Result<app::RemovedTags> removeCategory(const app::Lease&,
+                                                 domain::CategoryId id) override {
+        if (error) {
+            return std::unexpected(*error);
+        }
+        lastId = id;
+        return app::RemovedTags{4, 7};
+    }
+
+    app::Result<app::CreatedTag> createTag(const app::Lease&,
+                                           const app::CreateTagCmd& cmd) override {
+        if (error) {
+            return std::unexpected(*error);
+        }
+        lastCreate = cmd;
+        return app::CreatedTag{domain::Tag{12, 1, cmd.name}, tagCreated};
+    }
+
+    app::Result<domain::Tag> updateTag(const app::Lease&, domain::TagId id,
+                                       const app::UpdateTagCmd& cmd) override {
+        if (error) {
+            return std::unexpected(*error);
+        }
+        lastId = id;
+        lastUpdate = cmd;
+        return domain::Tag{id, cmd.categoryId.value_or(1), cmd.name.value_or("Ирис")};
+    }
+
+    app::Result<std::size_t> mergeTag(const app::Lease&, domain::TagId from,
+                                      domain::TagId into) override {
+        if (error) {
+            return std::unexpected(*error);
+        }
+        lastId = from;
+        lastInto = into;
+        return 5;
+    }
+
+    app::Result<std::size_t> removeTag(const app::Lease&, domain::TagId id) override {
+        if (error) {
+            return std::unexpected(*error);
+        }
+        lastId = id;
+        return 6;
+    }
+
+    app::Result<std::size_t> assign(const app::Lease&, const app::AssignTagsCmd& cmd) override {
+        if (error) {
+            return std::unexpected(*error);
+        }
+        lastAssign = cmd;
+        return 3;
+    }
+
+    std::vector<app::CategoryWithTags> categories;
+    std::optional<domain::Error> error;
+    bool tagCreated = true;
+    std::string lastName;
+    std::int64_t lastId = 0;
+    std::int64_t lastInto = 0;
+    std::optional<app::CreateTagCmd> lastCreate;
+    std::optional<app::UpdateTagCmd> lastUpdate;
+    std::optional<app::AssignTagsCmd> lastAssign;
 };
 
 struct FakeServices {
@@ -326,8 +427,11 @@ struct FakeServices {
     std::shared_ptr<FakeImportExportService> importExport =
         std::make_shared<FakeImportExportService>();
     std::shared_ptr<FakeSearchService> search = std::make_shared<FakeSearchService>();
+    std::shared_ptr<FakeTagsService> tags = std::make_shared<FakeTagsService>();
 
-    [[nodiscard]] app::Services services() const { return {safe, entries, importExport, search}; }
+    [[nodiscard]] app::Services services() const {
+        return {safe, entries, importExport, search, tags};
+    }
 };
 
 } // namespace safebox::test

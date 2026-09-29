@@ -12,5 +12,6 @@ namespace safebox::app {
 [[nodiscard]] std::shared_ptr<EntriesService> makeEntriesService(Ports ports);
 [[nodiscard]] std::shared_ptr<ImportExportService> makeImportExportService(Ports ports);
 [[nodiscard]] std::shared_ptr<SearchService> makeSearchService(Ports ports);
+[[nodiscard]] std::shared_ptr<TagsService> makeTagsService(Ports ports);
 
 } // namespace safebox::app

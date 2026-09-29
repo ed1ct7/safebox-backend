@@ -8,6 +8,7 @@ add_library(safebox-application STATIC
     src/entries_service.cpp
     src/import_export.cpp
     src/search_service.cpp
+    src/tags_service.cpp
     src/sealing.cpp
     src/factory.cpp
 )

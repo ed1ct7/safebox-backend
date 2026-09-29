@@ -32,6 +32,20 @@ std::optional<std::string> requireString(const Json& body, const char* field,
     return it->get<std::string>();
 }
 
+bool readOptionalString(const Json& body, const char* field, std::optional<std::string>& value,
+                        httplib::Response& res) {
+    const auto it = body.find(field);
+    if (it == body.end()) {
+        return true;
+    }
+    if (!it->is_string()) {
+        sendError(res, 400, "bad_request", std::string("Поле '") + field + "' должно быть строкой");
+        return false;
+    }
+    value = it->get<std::string>();
+    return true;
+}
+
 std::optional<domain::EntryId> parseId(std::string_view text) noexcept {
     domain::EntryId id = 0;
     const auto* end = text.data() + text.size();
@@ -210,6 +224,31 @@ Json toJson(const domain::SearchHit& hit) {
         {"entry", toJson(hit.entry)},
         {"path", toJson(hit.path)},
         {"matchedIn", std::move(matchedIn)},
+    };
+}
+
+Json toJson(const domain::Tag& tag) {
+    return Json{{"id", tag.id}, {"categoryId", tag.categoryId}, {"name", tag.name}};
+}
+
+Json toJson(const app::CategoryWithTags& category) {
+    Json tags = Json::array();
+    for (const auto& item : category.tags) {
+        auto tag = toJson(item.tag);
+        tag["count"] = item.count;
+        tags.push_back(std::move(tag));
+    }
+    return Json{
+        {"id", category.category.id},
+        {"name", category.category.name},
+        {"tags", std::move(tags)},
+    };
+}
+
+Json toJson(const app::RemovedTags& removed) {
+    return Json{
+        {"removedTags", removed.removedTags},
+        {"affectedEntries", removed.affectedEntries},
     };
 }
 

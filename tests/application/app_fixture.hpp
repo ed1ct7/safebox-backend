@@ -115,6 +115,27 @@ struct AppFixture {
         return *it;
     }
 
+    // Тег в категории; недостающая категория создается.
+    domain::TagId tag(const app::UnlockResult& session, const std::string& category,
+                      const std::string& name) {
+        auto made = services.tags->createTag(lease(session), {category, name, true});
+        REQUIRE(made.has_value());
+        return made->tag.id;
+    }
+
+    // Ставит теги на записи; -> сколько записей изменилось.
+    std::size_t tagEntries(const app::UnlockResult& session, std::vector<domain::EntryId> ids,
+                           const std::vector<domain::TagId>& tags, bool inherit = false) {
+        app::AssignTagsCmd cmd;
+        cmd.ids = std::move(ids);
+        for (const auto id : tags) {
+            cmd.add.push_back({id, inherit});
+        }
+        auto changed = services.tags->assign(lease(session), cmd);
+        REQUIRE(changed.has_value());
+        return *changed;
+    }
+
     std::unique_ptr<domain::CryptoSuite> crypto = infra::makeSodiumCrypto();
     InMemoryVaultStore store;
     FakeThumbnailer thumbnailer;
