@@ -17,6 +17,7 @@ add_library(safebox-infra STATIC
     src/stb_thumbnailer.cpp
     src/stream_zip_writer.cpp
     src/system_clock.cpp
+    src/winhttp_page_fetcher.cpp
 )
 
 target_include_directories(safebox-infra
@@ -36,6 +37,10 @@ target_link_libraries(safebox-infra
             fmt::fmt
             WebP::webp
 )
+if(WIN32)
+    # WinHTTP - загрузка страниц, ws2_32 - проверка адресов, normaliz - IDN-имена хостов
+    target_link_libraries(safebox-infra PRIVATE winhttp ws2_32 normaliz)
+endif()
 
 sbx_apply_warnings(safebox-infra)
 sbx_apply_sanitizers(safebox-infra)

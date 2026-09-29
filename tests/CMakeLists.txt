@@ -33,6 +33,7 @@ sbx_add_test_executable(safebox-app-tests
     application/format_test.cpp
     application/catalog_test.cpp
     application/rules_test.cpp
+    application/link_preview_test.cpp
 )
 target_include_directories(safebox-app-tests PRIVATE
     "${PROJECT_SOURCE_DIR}/src/application/src" # white-box: IdlePolicy
@@ -64,10 +65,12 @@ sbx_add_test_executable(safebox-infra-tests
     infra/sqlite_store_test.cpp
     infra/crypto_test.cpp
     infra/media_zip_test.cpp
+    infra/page_fetcher_test.cpp
 )
 target_include_directories(safebox-infra-tests SYSTEM PRIVATE "${Stb_INCLUDE_DIR}")
 target_include_directories(safebox-infra-tests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/fakes" # store_contract.hpp: общие проверки хранилища
+    "${PROJECT_SOURCE_DIR}/src/infrastructure/src" # white-box: internal_address.hpp
 )
 target_link_libraries(safebox-infra-tests PRIVATE
     safebox-infra

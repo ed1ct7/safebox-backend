@@ -8,6 +8,7 @@
 #include "safebox/domain/ports/crypto.hpp"
 #include "safebox/domain/ports/media.hpp"
 #include "safebox/domain/ports/storage.hpp"
+#include "safebox/domain/ports/web.hpp"
 
 namespace safebox::infra {
 
@@ -22,5 +23,7 @@ struct ZipWriterOptions {
 [[nodiscard]] std::unique_ptr<domain::Thumbnailer> makeStbThumbnailer();
 [[nodiscard]] std::unique_ptr<domain::ZipWriter> makeStreamZipWriter(ZipWriterOptions options = {});
 [[nodiscard]] std::unique_ptr<domain::Clock> makeSystemClock();
+// WinHTTP на Windows; на остальных платформах всегда отвечает ошибкой.
+[[nodiscard]] std::unique_ptr<domain::PageFetcher> makePageFetcher();
 
 } // namespace safebox::infra
