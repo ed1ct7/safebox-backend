@@ -156,7 +156,7 @@ public:
         hits.reserve(matches.size());
         for (const auto& match : matches) {
             domain::SearchHit hit;
-            hit.entry = cat.describe(*match.node);
+            hit.entry = describeEntry(ctx->session, cat, *match.node);
             if (match.node->entry.parentId) {
                 hit.path = cat.pathTo(*match.node->entry.parentId);
             }

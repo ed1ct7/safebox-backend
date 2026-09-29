@@ -24,5 +24,7 @@ namespace safebox::http {
 [[nodiscard]] Json toJson(const app::RemovedTags& removed);
 [[nodiscard]] Json toJson(const app::ImportPlan& plan);
 [[nodiscard]] Json toJson(const domain::ImportResult& result);
+[[nodiscard]] Json toJson(const app::CreateLinksResult& result);
+[[nodiscard]] Json toJson(const domain::AppSettings& settings);
 
 } // namespace safebox::http

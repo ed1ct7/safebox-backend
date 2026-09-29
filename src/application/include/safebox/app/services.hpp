@@ -15,6 +15,7 @@
 #include "safebox/domain/io.hpp"
 #include "safebox/domain/model/entry.hpp"
 #include "safebox/domain/model/error.hpp"
+#include "safebox/domain/model/settings.hpp"
 
 namespace safebox::app {
 
@@ -336,6 +337,68 @@ public:
     search(const Lease& lease, const SearchQuery& query) = 0;
 };
 
+// LinksService
+
+inline constexpr std::size_t kMaxLinksPerRequest = 10'000;
+
+struct NewLink {
+    std::string url;                 // как ввел пользователь; пробелы по краям срезаются
+    std::optional<std::string> name; // не задано - хост адреса
+    std::string path;                // "Закладки/Работа": папки внутри parent, пусто - сам parent
+};
+
+struct CreateLinksCmd {
+    std::optional<domain::EntryId> parent; // nullopt - корень; иначе любая запись
+    std::vector<NewLink> links;
+};
+
+// Ссылка с таким адресом (без учета схемы/хоста в регистре, порта по умолчанию, "/" в конце и
+// utm_-параметров) уже лежит у того же родителя.
+struct ExistingLink {
+    std::string url;
+    domain::EntryId entryId = 0;
+};
+
+struct CreateLinksResult {
+    std::vector<domain::Entry> created;
+    std::vector<ExistingLink> existing;
+    std::vector<std::string> invalid; // не http(s)-адрес или недопустимый путь папок
+};
+
+class LinksService {
+public:
+    virtual ~LinksService() = default;
+
+    // Ссылки без содержимого одной транзакцией: всё или ничего. Больше kMaxLinksPerRequest ->
+    // InvalidArgument, нет parent -> NotFound. Если в настройках включен предпросмотр, каждая
+    // созданная ссылка становится в очередь фонового воркера (previewPending).
+    [[nodiscard]] virtual Result<CreateLinksResult> create(const Lease& lease,
+                                                           const CreateLinksCmd& cmd) = 0;
+    // Синхронно (до 15 с), независимо от настройки: нет записи -> NotFound, не ссылка ->
+    // InvalidArgument, страница не загрузилась -> PreviewFailed.
+    [[nodiscard]] virtual Result<domain::Entry> refreshPreview(const Lease& lease,
+                                                               domain::EntryId id) = 0;
+    // Запись стоит в очереди на предпросмотр (или обрабатывается сейчас).
+    [[nodiscard]] virtual bool previewPending(const Lease& lease, domain::EntryId id) const = 0;
+    // Ждет, пока очередь опустеет и текущее задание закончится. Для тестов: в работе никто не
+    // ждет предпросмотры.
+    virtual void drain() = 0;
+};
+
+// SettingsService
+
+// Настройки не зависят от сейфа: доступны и без аренды, а транспорт отдает их только
+// авторизованному.
+class SettingsService {
+public:
+    virtual ~SettingsService() = default;
+
+    [[nodiscard]] virtual domain::AppSettings get() = 0;
+    // Сохраняет и применяет сразу; не сохранилось -> ошибка, прежние настройки остаются.
+    [[nodiscard]] virtual Result<domain::AppSettings>
+    update(const domain::AppSettings& settings) = 0;
+};
+
 // Набор для транспорта
 
 struct Services {
@@ -344,6 +407,8 @@ struct Services {
     std::shared_ptr<ImportExportService> importExport;
     std::shared_ptr<SearchService> search;
     std::shared_ptr<TagsService> tags;
+    std::shared_ptr<LinksService> links;
+    std::shared_ptr<SettingsService> settings;
 };
 
 } // namespace safebox::app

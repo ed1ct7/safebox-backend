@@ -1,9 +1,11 @@
 // /api/v1/media/:id/{thumbnail,content,download,zip}; zip - папка или запись с вложениями
-// inline отдаем только фото/видео, остальное attachment, чтобы html/svg из сейфа не исполнялся
+// inline отдаем только фото/видео, остальное attachment, чтобы html/svg из сейфа не исполнялся.
+// Ссылка без блоба скачивается ярлыком "имя.url"; content у нее 404 (отдавать нечего)
 #include <algorithm>
 #include <array>
 
 #include "dto.hpp"
+#include "safebox/domain/model/rules.hpp"
 
 namespace safebox::http {
 
@@ -46,6 +48,14 @@ void serveStream(httplib::Response& res, app::OpenedContent opened, std::string_
             DataSinkAdapter out(sink);
             return stream->read(offset, length, out).has_value();
         });
+}
+
+// Ярлык вместо файла: содержимого у ссылки нет, только адрес.
+void serveShortcut(httplib::Response& res, const domain::Entry& entry) {
+    replaceHeader(res, "Content-Disposition",
+                  contentDisposition("attachment", domain::shortcutFileName(entry.name)));
+    res.status = 200;
+    res.set_content(domain::shortcutContent(entry.meta.url), "application/octet-stream");
 }
 
 // Архив папки называется "имя.zip", архив вложений записи - "имя (вложения).zip".
@@ -135,6 +145,10 @@ void registerMediaApi(httplib::Server& server, ApiContext& ctx) {
                    }
                    if (entry->isFolder()) {
                        serveZip(ctx, res, std::move(*lease), *entry);
+                       return;
+                   }
+                   if (entry->meta.kind == domain::Kind::Link && !entry->meta.blobId) {
+                       serveShortcut(res, *entry);
                        return;
                    }
                    auto opened = ctx.services.importExport->openContent(

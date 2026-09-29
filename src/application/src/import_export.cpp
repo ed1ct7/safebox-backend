@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "path_folders.hpp"
 #include "safebox/domain/model/rules.hpp"
 #include "safebox/domain/model/safe_format.hpp"
 #include "service_impls.hpp"
@@ -215,96 +216,19 @@ constexpr std::string_view kAttachmentsSuffix = " (вложения)";
 // Имя записи в архиве: ссылка без блоба лежит ярлыком "имя.url".
 [[nodiscard]] std::string zipName(const domain::Entry& entry) {
     const bool shortcut = entry.meta.kind == Kind::Link && !entry.meta.blobId;
-    if (shortcut && !domain::detail::iequals(domain::detail::extensionOf(entry.name), ".url")) {
-        return entry.name + ".url";
-    }
-    return entry.name;
+    return shortcut ? domain::shortcutFileName(entry.name) : entry.name;
 }
 
 // импорт
-
-// Путь файла из запроса: сегменты очищены, ".." или пустой путь - недопустим.
-struct SplitPath {
-    std::string clean; // очищенный путь целиком: для отчета об ошибке
-    std::vector<std::string> dirs;
-    std::string name;
-    bool valid = false;
-};
-
-[[nodiscard]] SplitPath splitPath(std::string_view relativePath) {
-    SplitPath out;
-    std::vector<std::string> parts;
-    bool parent = false;
-    std::size_t start = 0;
-    while (start <= relativePath.size()) {
-        const auto end = relativePath.find_first_of("/\\", start);
-        const auto segment = relativePath.substr(
-            start, end == std::string_view::npos ? std::string_view::npos : end - start);
-        if (segment == "..") {
-            parent = true;
-        } else if (!segment.empty() && segment != ".") {
-            parts.push_back(domain::sanitizeName(segment));
-        }
-        if (end == std::string_view::npos) {
-            break;
-        }
-        start = end + 1;
-    }
-    for (const auto& part : parts) {
-        out.clean.append(out.clean.empty() ? "" : "/").append(part);
-    }
-    if (parent || parts.empty()) {
-        if (out.clean.empty()) {
-            out.clean = domain::sanitizeName(relativePath);
-        }
-        return out;
-    }
-    out.name = std::move(parts.back());
-    parts.pop_back();
-    out.dirs = std::move(parts);
-    out.valid = true;
-    return out;
-}
-
-// Занятые имена у одного родителя: записи любого вида по folded-имени. С файлом конфликтует
-// первая запись с таким именем; папки в каталоге идут первыми.
-class Siblings {
-public:
-    struct Occupant {
-        EntryId id = 0;
-        bool isFolder = false;
-    };
-
-    Siblings(const Catalog& catalog, std::optional<EntryId> parent) {
-        for (const auto child : catalog.childrenOf(parent)) {
-            const auto* node = catalog.find(child);
-            add(node->folded, Occupant{child, node->entry.isFolder()});
-        }
-    }
-
-    [[nodiscard]] const Occupant* find(const std::string& folded) const {
-        const auto it = byName_.find(folded);
-        return it == byName_.end() ? nullptr : &it->second;
-    }
-    [[nodiscard]] const std::unordered_set<std::string>& taken() const noexcept { return taken_; }
-
-    void add(std::string folded, Occupant occupant) {
-        taken_.insert(folded);
-        byName_.try_emplace(std::move(folded), occupant);
-    }
-
-private:
-    std::unordered_map<std::string, Occupant> byName_;
-    std::unordered_set<std::string> taken_;
-};
 
 class ImportSessionImpl final : public ImportSession {
 public:
     ImportSessionImpl(Lease lease, Ports ports, VaultSession& session,
                       std::shared_ptr<const Sealer> sealer, std::optional<EntryId> root,
                       VaultSession::CatalogPtr snapshot)
-        : lease_(std::move(lease)), ports_(ports), session_(session), sealer_(std::move(sealer)),
-          root_(root), snapshot_(std::move(snapshot)), chunkSize_(session.chunkSize()) {}
+        : lease_(std::move(lease)), ports_(ports), session_(session), sealer_(sealer),
+          paths_(ports, session, std::move(sealer), root, std::move(snapshot)),
+          chunkSize_(session.chunkSize()) {}
 
     ~ImportSessionImpl() override {
         if (current_) {
@@ -334,7 +258,7 @@ public:
         }
         file.name = std::move(split.name);
 
-        auto parent = resolveFolders(split.dirs);
+        auto parent = paths_.resolve(split.dirs);
         if (!parent) {
             failCurrent(parent.error().message);
             return fatalOnly(parent.error());
@@ -446,7 +370,7 @@ private:
     // Имя занято -> по решению: пропуск, уникальное имя или запись поверх существующей.
     // Существующая папка не заменяется: файл получает уникальное имя рядом.
     void resolveName(CurrentFile& file, ConflictPolicy policy) {
-        const auto& siblings = siblingsOf(file.parent);
+        const auto& siblings = paths_.siblingsOf(file.parent);
         const auto* occupant = siblings.find(foldForSearch(file.name));
         if (occupant == nullptr) {
             return;
@@ -525,7 +449,8 @@ private:
             auto thumb = ports_.thumbnailer.make(file.thumbSource);
             domain::secureWipe(file.thumbSource);
             if (thumb && !thumb->empty()) {
-                auto blob = writeBlob(KeyPurpose::Thumbnails, *thumb);
+                auto blob = writeBlob(ports_.store.blobs(), *sealer_, chunkSize_,
+                                      KeyPurpose::Thumbnails, *thumb);
                 domain::secureWipe(*thumb);
                 if (blob) {
                     file.thumbBlob = *blob;
@@ -558,7 +483,7 @@ private:
         file.committed = true;
         if (!file.replaces) {
             // следующие файлы партии с этим именем уже конфликтуют с ним
-            siblingsOf(file.parent).add(foldForSearch(file.name), {*id, false});
+            paths_.siblingsOf(file.parent).add(foldForSearch(file.name), {*id, false});
         }
         session_.invalidateCatalog();
         return {};
@@ -641,103 +566,6 @@ private:
         return record->id;
     }
 
-    Siblings& siblingsOf(std::optional<EntryId> parent) {
-        return siblings_.try_emplace(parent, *snapshot_, parent).first->second;
-    }
-
-    Result<std::optional<EntryId>> resolveFolders(const std::vector<std::string>& dirs) {
-        std::optional<EntryId> parent = root_;
-        std::string key;
-        for (const auto& dir : dirs) {
-            // без учета регистра: "Pict" и "pict" на Windows - одна папка
-            const auto foldedDir = foldForSearch(dir);
-            key.append(foldedDir).push_back('/');
-            if (const auto it = folders_.find(key); it != folders_.end()) {
-                parent = it->second;
-                continue;
-            }
-            auto& siblings = siblingsOf(parent);
-            const auto* found = siblings.find(foldedDir);
-            EntryId folder = 0;
-            if (found != nullptr && found->isFolder) {
-                folder = found->id;
-            } else {
-                auto made = createFolder(parent, dir);
-                if (!made) {
-                    return std::unexpected(made.error());
-                }
-                folder = *made;
-                siblings.add(foldedDir, {folder, true});
-            }
-            folders_.emplace(key, folder);
-            parent = folder;
-        }
-        return parent;
-    }
-
-    Result<EntryId> createFolder(std::optional<EntryId> parent, const std::string& name) {
-        auto uow = ports_.store.begin();
-        if (!uow) {
-            return std::unexpected(uow.error());
-        }
-        domain::EntryRecord record;
-        record.parentId = parent;
-        record.isFolder = true;
-        auto id = (*uow)->entries().insert(record);
-        if (!id) {
-            return std::unexpected(id.error());
-        }
-        domain::EntryMeta meta;
-        meta.kind = Kind::Folder;
-        meta.createdAt = meta.modifiedAt = domain::toUnixMillis(ports_.clock.now());
-        auto encName = sealer_->sealName(*id, name);
-        if (!encName) {
-            return std::unexpected(encName.error());
-        }
-        auto encMeta = sealer_->sealMeta(*id, meta);
-        if (!encMeta) {
-            return std::unexpected(encMeta.error());
-        }
-        if (auto st = (*uow)->entries().updateSealed(*id, *encName, *encMeta); !st) {
-            return std::unexpected(st.error());
-        }
-        if (auto st = (*uow)->commit(); !st) {
-            return std::unexpected(st.error());
-        }
-        session_.invalidateCatalog();
-        return *id;
-    }
-
-    // Небольшой блоб целиком из памяти (миниатюра): pending, пока не promote.
-    Result<BlobId> writeBlob(KeyPurpose purpose, std::span<const std::byte> data) {
-        auto writer = ports_.store.blobs().create();
-        if (!writer) {
-            return std::unexpected(writer.error());
-        }
-        const auto id = (*writer)->id();
-        const auto discard = [&](const Error& e) -> Result<BlobId> {
-            (void)ports_.store.blobs().discard(id);
-            return std::unexpected(e);
-        };
-        const auto count = domain::chunkCountFor(data.size(), chunkSize_);
-        for (std::uint32_t i = 0; i < count; ++i) {
-            const auto from = std::size_t{i} * chunkSize_;
-            const auto part =
-                data.subspan(from, std::min<std::size_t>(chunkSize_, data.size() - from));
-            auto sealed = sealer_->sealChunk(purpose, id, i, i + 1 == count, part);
-            if (!sealed) {
-                return discard(sealed.error());
-            }
-            if (auto st = (*writer)->append(*sealed); !st) {
-                return discard(st.error());
-            }
-        }
-        if (auto st = (*writer)->finish(data.size()); !st) {
-            return discard(st.error());
-        }
-        return id;
-    }
-
     void failCurrent(std::string message) {
         current_->failed = true;
         current_->error = std::move(message);
@@ -767,11 +595,8 @@ private:
     Ports ports_;
     VaultSession& session_;
     std::shared_ptr<const Sealer> sealer_;
-    std::optional<EntryId> root_;
-    VaultSession::CatalogPtr snapshot_; // каталог на начало импорта
+    PathFolders paths_; // папки пути и занятые имена; каталог на начало импорта
     std::uint32_t chunkSize_;
-    std::map<std::string, EntryId> folders_; // "a/b/" (folded) -> папка, найденная или созданная
-    std::map<std::optional<EntryId>, Siblings> siblings_; // родитель -> занятые имена
     std::optional<CurrentFile> current_;
     domain::ImportResult result_;
 };
@@ -847,7 +672,8 @@ public:
                 ++plan.newFiles;
                 continue;
             }
-            plan.conflicts.push_back({file.path, cat.describe(*cat.find(occupant->id))});
+            plan.conflicts.push_back(
+                {file.path, describeEntry(ctx->session, cat, *cat.find(occupant->id))});
         }
         return plan;
     }
@@ -874,6 +700,9 @@ public:
                 return fail(Error::Code::InvalidArgument, "Папку нельзя открыть как файл");
             }
             if (!entry.meta.blobId) {
+                if (entry.meta.kind == Kind::Link) {
+                    return fail(Error::Code::NotFound, "У ссылки нет содержимого, только адрес");
+                }
                 return corruptedData();
             }
             blob = checkedBlob(ports_.store.blobs(), *entry.meta.blobId, KeyPurpose::Content,
@@ -965,7 +794,7 @@ public:
                     return corruptedData();
                 }
                 // ссылка без блоба - ярлык, как его сделал бы проводник
-                auto shortcut = "[InternetShortcut]\r\nURL=" + entry.meta.url + "\r\n";
+                auto shortcut = domain::shortcutContent(entry.meta.url);
                 domain::MemorySource source(domain::asBytes(shortcut));
                 auto st = zip->addFile(path, shortcut.size(), entry.meta.modifiedAt, source);
                 domain::secureWipe(shortcut);

@@ -337,6 +337,20 @@ struct DetectedKind {
     return std::nullopt;
 }
 
+// Ссылка без блоба отдается ярлыком, как его записал бы проводник: файл "имя.url" (расширение не
+// дублируется) с секцией [InternetShortcut].
+[[nodiscard]] inline std::string shortcutFileName(std::string_view name) {
+    std::string out(name);
+    if (!detail::iequals(detail::extensionOf(name), ".url")) {
+        out += ".url";
+    }
+    return out;
+}
+
+[[nodiscard]] inline std::string shortcutContent(std::string_view url) {
+    return "[InternetShortcut]\r\nURL=" + std::string(url) + "\r\n";
+}
+
 // Хост из http(s)-URL в нижнем регистре, без userinfo и порта.
 [[nodiscard]] inline std::string urlHost(std::string_view url) {
     const auto scheme = url.find("://");

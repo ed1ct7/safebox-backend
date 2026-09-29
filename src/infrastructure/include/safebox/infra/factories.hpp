@@ -1,12 +1,14 @@
 // Фабрики адаптеров. Сюда не инклюдить sqlite3.h/sodium.h - этот хедер видит daemon
 #pragma once
 
+#include <filesystem>
 #include <memory>
 
 #include "safebox/domain/ports/archive.hpp"
 #include "safebox/domain/ports/clock.hpp"
 #include "safebox/domain/ports/crypto.hpp"
 #include "safebox/domain/ports/media.hpp"
+#include "safebox/domain/ports/settings.hpp"
 #include "safebox/domain/ports/storage.hpp"
 #include "safebox/domain/ports/web.hpp"
 
@@ -25,5 +27,8 @@ struct ZipWriterOptions {
 [[nodiscard]] std::unique_ptr<domain::Clock> makeSystemClock();
 // WinHTTP на Windows; на остальных платформах всегда отвечает ошибкой.
 [[nodiscard]] std::unique_ptr<domain::PageFetcher> makePageFetcher();
+// Настройки в текстовом файле key=value; нет файла - значения по умолчанию.
+[[nodiscard]] std::unique_ptr<domain::SettingsStore>
+makeFileSettingsStore(std::filesystem::path file);
 
 } // namespace safebox::infra

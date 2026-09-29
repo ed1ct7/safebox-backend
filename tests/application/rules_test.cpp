@@ -115,3 +115,20 @@ TEST_CASE("shortcutUrl keeps working through isHttpUrl", "[rules][url]") {
     CHECK_FALSE(url("[InternetShortcut]\r\nURL=http://a b\r\n").has_value());
     CHECK_FALSE(url("[InternetShortcut]\r\n").has_value());
 }
+
+TEST_CASE("a link without content is handed out as a .url shortcut", "[rules][url]") {
+    CHECK(domain::shortcutFileName("Мой сайт") == "Мой сайт.url");
+    CHECK(domain::shortcutFileName("example.com") ==
+          "example.com.url"); // ".com" - не расширение ярлыка
+    CHECK(domain::shortcutFileName("site.url") == "site.url");
+    CHECK(domain::shortcutFileName("SITE.URL") == "SITE.URL"); // регистр не важен
+    CHECK(domain::shortcutFileName("a.url.txt") == "a.url.txt.url");
+    CHECK(domain::shortcutFileName(".url") == ".url.url"); // это имя без расширения
+
+    const auto content = domain::shortcutContent("https://example.com/a?b=1");
+    CHECK(content == "[InternetShortcut]\r\nURL=https://example.com/a?b=1\r\n");
+    // ярлык читается обратно тем же разбором, каким его читает импорт
+    const auto back = domain::shortcutUrl(domain::asBytes(content));
+    REQUIRE(back.has_value());
+    CHECK(*back == "https://example.com/a?b=1");
+}

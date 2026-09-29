@@ -421,6 +421,54 @@ public:
     std::optional<app::AssignTagsCmd> lastAssign;
 };
 
+// Отвечает заготовками и запоминает аргументы; error проваливает любую операцию.
+class FakeLinksService final : public app::LinksService {
+public:
+    app::Result<app::CreateLinksResult> create(const app::Lease&,
+                                               const app::CreateLinksCmd& cmd) override {
+        if (error) {
+            return std::unexpected(*error);
+        }
+        lastCreate = cmd;
+        return createResult;
+    }
+
+    app::Result<domain::Entry> refreshPreview(const app::Lease&, domain::EntryId id) override {
+        if (error) {
+            return std::unexpected(*error);
+        }
+        lastPreviewId = id;
+        return refreshed;
+    }
+
+    bool previewPending(const app::Lease&, domain::EntryId) const override { return false; }
+    void drain() override {}
+
+    app::CreateLinksResult createResult;
+    domain::Entry refreshed = makeEntry(3, std::nullopt, domain::Kind::Link, "Example");
+    std::optional<domain::Error> error;
+    std::optional<app::CreateLinksCmd> lastCreate;
+    domain::EntryId lastPreviewId = 0;
+};
+
+class FakeSettingsService final : public app::SettingsService {
+public:
+    domain::AppSettings get() override { return settings; }
+
+    app::Result<domain::AppSettings> update(const domain::AppSettings& next) override {
+        if (error) {
+            return std::unexpected(*error);
+        }
+        ++updates;
+        settings = next;
+        return settings;
+    }
+
+    domain::AppSettings settings;
+    std::optional<domain::Error> error;
+    int updates = 0;
+};
+
 struct FakeServices {
     std::shared_ptr<FakeSafeService> safe = std::make_shared<FakeSafeService>();
     std::shared_ptr<FakeEntriesService> entries = std::make_shared<FakeEntriesService>();
@@ -428,9 +476,11 @@ struct FakeServices {
         std::make_shared<FakeImportExportService>();
     std::shared_ptr<FakeSearchService> search = std::make_shared<FakeSearchService>();
     std::shared_ptr<FakeTagsService> tags = std::make_shared<FakeTagsService>();
+    std::shared_ptr<FakeLinksService> links = std::make_shared<FakeLinksService>();
+    std::shared_ptr<FakeSettingsService> settings = std::make_shared<FakeSettingsService>();
 
     [[nodiscard]] app::Services services() const {
-        return {safe, entries, importExport, search, tags};
+        return {safe, entries, importExport, search, tags, links, settings};
     }
 };
 

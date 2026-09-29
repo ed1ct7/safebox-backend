@@ -225,14 +225,17 @@ int main(int argc, char** argv) {
         auto thumbnailer = sb::infra::makeStbThumbnailer();
         auto zip = sb::infra::makeStreamZipWriter();
         auto clock = sb::infra::makeSystemClock();
+        auto fetcher = sb::infra::makePageFetcher();
+        auto settings =
+            sb::infra::makeFileSettingsStore(sb::daemon::settingsFile(sb::daemon::systemEnv));
 
         // сценарии (application)
         sb::app::AppConfig appConfig;
         appConfig.idleTimeout = config->idleTimeout;
         appConfig.presenceTimeout = config->presenceTimeout;
         appConfig.defaultDirectory = config->defaultDirectory;
-        auto services =
-            sb::app::makeServices({*crypto, *store, *thumbnailer, *zip, *clock}, appConfig);
+        auto services = sb::app::makeServices(
+            {*crypto, *store, *thumbnailer, *zip, *clock, *fetcher, *settings}, appConfig);
 
         // транспорт (http)
         sb::daemon::WebAssets assets;

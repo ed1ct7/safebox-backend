@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -31,9 +32,12 @@ namespace safebox::app {
 [[nodiscard]] std::string foldForSearch(std::string_view text);
 
 // Имя, не занятое среди соседей: "имя (2).ext", "имя (3).ext"... taken - folded-имена соседей
-// (результат туда не добавляется). Для папок расширения нет.
+// (результат туда не добавляется). Для папок расширения нет. resume - для тех, кто подбирает много
+// имен подряд от одной основы при растущем taken: номер, с которого продолжить (меньше 2 - с
+// двойки), после вызова там выбранный номер; без него каждый вызов пробует все номера с двойки.
 [[nodiscard]] std::string uniqueName(std::string_view name, bool isFolder,
-                                     const std::unordered_set<std::string>& taken);
+                                     const std::unordered_set<std::string>& taken,
+                                     int* resume = nullptr);
 
 class Catalog {
 public:
@@ -142,6 +146,11 @@ public:
     [[nodiscard]] domain::Result<CatalogPtr> catalog(const Loader& load);
     void invalidateCatalog() noexcept;
 
+    // Ссылки, ждущие предпросмотра: очередь и ее задания у LinksService, а признак для ответов
+    // хранит сессия - с блокировкой он исчезает вместе с ней.
+    void setPreviewPending(domain::EntryId id, bool pending);
+    [[nodiscard]] bool previewPending(domain::EntryId id) const;
+
 private:
     struct Token {
         std::string value;
@@ -159,6 +168,7 @@ private:
     IdlePolicy idle_;
     CatalogPtr catalog_;
     std::uint64_t catalogGeneration_ = 0;
+    std::unordered_set<domain::EntryId> previewPending_;
 
     std::mutex catalogBuildMutex_; // один построитель кэша за раз
 
@@ -169,6 +179,10 @@ private:
 };
 
 // общие помощники сервисов
+
+// Еще одна аренда сессии, за которой следят по weak_ptr (фоновая работа держит ее только пока
+// пишет); nullopt - сессии уже нет или она закрывается.
+[[nodiscard]] std::optional<Lease> leaseFrom(const std::weak_ptr<VaultSession>& session);
 
 struct OperationContext {
     VaultSession& session;
@@ -182,5 +196,12 @@ struct OperationContext {
                                                                    const Sealer& sealer);
 [[nodiscard]] domain::Result<VaultSession::CatalogPtr> catalogOf(const OperationContext& ctx,
                                                                  domain::VaultStore& store);
+// Небольшой блоб целиком из памяти (миниатюра): pending, пока запись не сделает promote.
+[[nodiscard]] domain::Result<domain::BlobId>
+writeBlob(domain::BlobStore& blobs, const Sealer& sealer, std::uint32_t chunkSize,
+          domain::KeyPurpose purpose, std::span<const std::byte> data);
+// Запись для ответа: Catalog::describe() и признак очереди предпросмотра из сессии.
+[[nodiscard]] domain::Entry describeEntry(const VaultSession& session, const Catalog& catalog,
+                                          const Catalog::Node& node);
 
 } // namespace safebox::app

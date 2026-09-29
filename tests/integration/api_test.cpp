@@ -7,10 +7,13 @@
 
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <random>
 #include <thread>
+#include <utility>
 
 #include "../infra/temp_dir.hpp"
+#include "FakePageFetcher.hpp"
 #include "safebox/app/factory.hpp"
 #include "safebox/http/server.hpp"
 #include "safebox/infra/factories.hpp"
@@ -83,12 +86,15 @@ std::map<std::string, std::string> unzip(const std::string& archive) {
 
 // Композиция как в main.cpp, но с минимальным Argon2id и куском 64 КиБ.
 struct Stack {
-    explicit Stack(const std::filesystem::path& safeDir) {
+    // Настройки - в настоящем файле, а страницы - из FakePageFetcher: в сеть тесты не ходят.
+    explicit Stack(const std::filesystem::path& safeDir)
+        : settings(infra::makeFileSettingsStore(safeDir / "config" / "settings.ini")) {
         app::AppConfig config;
         config.kdf = domain::kMinimalKdf;
         config.chunkSize = kChunk;
         config.defaultDirectory = safeDir;
-        services = app::makeServices({*crypto, *store, *thumbnailer, *zip, *clock}, config);
+        services = app::makeServices(
+            {*crypto, *store, *thumbnailer, *zip, *clock, fetcher, *settings}, config);
         http::HttpConfig httpConfig;
         httpConfig.port = 0;
         server = std::make_unique<http::HttpServer>(services, assets, httpConfig);
@@ -126,6 +132,8 @@ struct Stack {
     std::unique_ptr<domain::Thumbnailer> thumbnailer = infra::makeStbThumbnailer();
     std::unique_ptr<domain::ZipWriter> zip = infra::makeStreamZipWriter();
     std::unique_ptr<domain::Clock> clock = infra::makeSystemClock();
+    test::FakePageFetcher fetcher;
+    std::unique_ptr<domain::SettingsStore> settings;
     app::Services services;
     NoAssets assets;
     std::unique_ptr<http::HttpServer> server;
@@ -829,4 +837,217 @@ TEST_CASE("a broken or misplaced manifest imports nothing over HTTP", "[integrat
     auto ok = c.Post("/api/v1/import", bearer(token), fine);
     REQUIRE(ok);
     CHECK(ok->status == 200);
+}
+
+TEST_CASE("links over HTTP: create, background preview, refresh, shortcut, zip and settings",
+          "[integration][UF-20][UF-21][UF-22]") {
+    test::TempDir dir;
+    const auto cover = makePng(64, 48);
+    const auto settingsFile = dir / "config" / "settings.ini";
+    const auto page = [](std::string_view title, std::string_view description,
+                         std::string_view image) {
+        std::string head = "<meta property=\"og:title\" content=\"" + std::string(title) + "\">" +
+                           "<meta property=\"og:description\" content=\"" +
+                           std::string(description) + "\">";
+        if (!image.empty()) {
+            head += "<meta property=\"og:image\" content=\"" + std::string(image) + "\">";
+        }
+        return "<!doctype html><html><head><meta charset=\"utf-8\">" + head +
+               "</head><body></body></html>";
+    };
+    std::string safePath;
+
+    {
+        Stack stack(dir.path());
+        auto c = stack.client();
+        auto created = c.Post(
+            "/api/v1/safe/create",
+            Json{{"path", "Ссылки"}, {"password", "пароль-1"}, {"confirm", "пароль-1"}}.dump(),
+            "application/json");
+        REQUIRE(created);
+        REQUIRE(created->status == 201);
+        const auto session = Json::parse(created->body);
+        const auto token = session["token"].get<std::string>();
+        safePath = session["safe"]["path"].get<std::string>();
+
+        // настройки: только с токеном; чтение файл не создает
+        auto anonymous = c.Get("/api/v1/settings");
+        REQUIRE(anonymous);
+        CHECK(anonymous->status == 401);
+        CHECK(get(c, "/api/v1/settings", token) == Json({{"linkPreviews", true}}));
+        CHECK_FALSE(std::filesystem::exists(settingsFile));
+
+        // пачка: две новые ссылки, дубль (utm и регистр не в счет) и не-ссылка
+        stack.fetcher.addHtml("https://example.com/post",
+                              page("Заголовок страницы", "Описание страницы", "/cover.png"));
+        stack.fetcher.addImage("https://example.com/cover.png", domain::toBytes(cover));
+        const Json request = {{"parentId", nullptr},
+                              {"links",
+                               {{{"url", "https://example.com/post"}},
+                                {{"url", "https://EXAMPLE.com/post/?utm_source=mail"}},
+                                {{"url", "ftp://example.com/file"}},
+                                {{"url", "https://second.example/"},
+                                 {"name", "Вторая"},
+                                 {"path", "Закладки/Работа"}}}}};
+        const auto made = post(c, "/api/v1/links", request, 201, bearer(token));
+        REQUIRE(made["created"].size() == 2);
+        const auto firstId = made["created"][0]["id"].get<std::int64_t>();
+        const auto secondId = made["created"][1]["id"].get<std::int64_t>();
+        CHECK(made["created"][0]["kind"] == "link");
+        CHECK(made["created"][0]["url"] == "https://example.com/post");
+        CHECK(made["created"][0]["domain"] == "example.com");
+        CHECK(made["created"][1]["name"] == "Вторая");
+        REQUIRE(made["existing"].size() == 1);
+        CHECK(made["existing"][0]["entryId"] == firstId);
+        CHECK(made["existing"][0]["url"] == "https://EXAMPLE.com/post/?utm_source=mail");
+        CHECK(made["invalid"] == Json::array({"ftp://example.com/file"}));
+
+        // фоновый предпросмотр: название, описание и настоящая миниатюра
+        stack.services.links->drain();
+        const auto root = get(c, "/api/v1/entries", token);
+        const auto link = byName(root, "Заголовок страницы");
+        CHECK(link["id"] == firstId);
+        CHECK(link["description"] == "Описание страницы");
+        CHECK(link["hasThumbnail"] == true);
+        CHECK_FALSE(link.contains("previewPending")); // очередь пуста
+        auto thumb =
+            c.Get("/api/v1/media/" + std::to_string(firstId) + "/thumbnail", bearer(token));
+        REQUIRE(thumb);
+        CHECK(thumb->status == 200);
+        CHECK(thumb->get_header_value("Content-Type") == "image/jpeg");
+        REQUIRE(thumb->body.size() > 3);
+        CHECK(thumb->body.substr(0, 3) == "\xFF\xD8\xFF");
+
+        // у второй страницы нет: осталась как создана
+        const auto bookmarks = byName(root, "Закладки");
+        const auto bookmarksId = bookmarks["id"].get<std::int64_t>();
+        CHECK(bookmarks["childCount"] == 1);
+        const auto work = byName(
+            get(c, "/api/v1/entries?parentId=" + std::to_string(bookmarksId), token), "Работа");
+        const auto workListing = get(
+            c, "/api/v1/entries?parentId=" + std::to_string(work["id"].get<std::int64_t>()), token);
+        const auto second = byName(workListing, "Вторая");
+        CHECK(second["id"] == secondId);
+        CHECK(second["hasThumbnail"] == false);
+        CHECK(second["description"] == "");
+
+        // по требованию: сначала сайт недоступен - 502 с причиной, потом отвечает
+        const auto previewPath = "/api/v1/entries/" + std::to_string(secondId) + "/preview";
+        const auto failed = post(c, previewPath, Json::object(), 502, bearer(token));
+        CHECK(failed["error"]["code"] == "preview_failed");
+        CHECK(failed["error"]["message"] == "Сайт недоступен");
+        stack.fetcher.addHtml("https://second.example/",
+                              page("Чужое название", "Описание второй", ""));
+        const auto refreshed = post(c, previewPath, Json::object(), 200, bearer(token));
+        CHECK(refreshed["name"] == "Вторая"); // имя задал пользователь
+        CHECK(refreshed["description"] == "Описание второй");
+        CHECK(refreshed["id"] == secondId);
+        post(c, "/api/v1/entries/" + std::to_string(bookmarksId) + "/preview", Json::object(), 422,
+             bearer(token)); // папка - не ссылка
+        post(c, "/api/v1/entries/999999/preview", Json::object(), 404, bearer(token));
+
+        // скачивание: ярлык вместо файла; содержимого у ссылки нет
+        const auto mediaPath = "/api/v1/media/" + std::to_string(firstId);
+        auto shortcut = c.Get(mediaPath + "/download", bearer(token));
+        REQUIRE(shortcut);
+        CHECK(shortcut->status == 200);
+        CHECK(shortcut->body == "[InternetShortcut]\r\nURL=https://example.com/post\r\n");
+        const auto disposition = shortcut->get_header_value("Content-Disposition");
+        CHECK(disposition.starts_with("attachment;"));
+        CHECK(disposition.ends_with(".url"));
+        auto content = c.Get(mediaPath + "/content", bearer(token));
+        REQUIRE(content);
+        CHECK(content->status == 404);
+        CHECK(Json::parse(content->body)["error"]["code"] == "not_found");
+
+        // в zip папки ссылка лежит ярлыком
+        auto zipped = c.Get("/api/v1/media/" + std::to_string(bookmarksId) + "/zip", bearer(token));
+        REQUIRE(zipped);
+        REQUIRE(zipped->status == 200);
+        const auto files = unzip(zipped->body);
+        CHECK(files.at("Закладки/Работа/Вторая.url") ==
+              "[InternetShortcut]\r\nURL=https://second.example/\r\n");
+
+        // предпросмотр выключили: новые ссылки в сеть не ходят, настройка лежит в файле
+        auto off = c.Patch("/api/v1/settings", bearer(token), Json{{"linkPreviews", false}}.dump(),
+                           "application/json");
+        REQUIRE(off);
+        REQUIRE(off->status == 200);
+        CHECK(Json::parse(off->body) == Json({{"linkPreviews", false}}));
+        CHECK(test::readFile(settingsFile) == "linkPreviews=0\n");
+        const auto calls = stack.fetcher.calls.load();
+        const auto quiet =
+            post(c, "/api/v1/links", {{"links", {{{"url", "https://quiet.example/"}}}}}, 201,
+                 bearer(token));
+        stack.services.links->drain();
+        CHECK(stack.fetcher.calls.load() == calls);
+        REQUIRE(quiet["created"].size() == 1);
+        CHECK_FALSE(quiet["created"][0].contains("previewPending"));
+        CHECK(quiet["created"][0]["name"] == "quiet.example");
+
+        post(c, "/api/v1/safe/lock", Json::object(), 204, bearer(token));
+    }
+
+    // новый запуск: настройка из файла, ссылки и их предпросмотр - из сейфа
+    {
+        Stack again(dir.path());
+        auto c = again.client();
+        const auto session =
+            post(c, "/api/v1/safe/unlock", {{"path", safePath}, {"password", "пароль-1"}}, 200);
+        const auto token = session["token"].get<std::string>();
+        CHECK(get(c, "/api/v1/settings", token) == Json({{"linkPreviews", false}}));
+        const auto root = get(c, "/api/v1/entries", token);
+        const auto link = byName(root, "Заголовок страницы");
+        CHECK(link["url"] == "https://example.com/post");
+        CHECK(link["description"] == "Описание страницы");
+        CHECK(link["hasThumbnail"] == true);
+        CHECK(byName(root, "quiet.example")["kind"] == "link");
+    }
+}
+
+TEST_CASE("a preview fetched after the safe was locked never reaches the file",
+          "[integration][UF-21]") {
+    test::TempDir dir;
+    Stack stack(dir.path());
+    auto c = stack.client();
+    auto created =
+        c.Post("/api/v1/safe/create",
+               Json{{"path", "Замок"}, {"password", "пароль-1"}, {"confirm", "пароль-1"}}.dump(),
+               "application/json");
+    REQUIRE(created);
+    REQUIRE(created->status == 201);
+    const auto token = Json::parse(created->body)["token"].get<std::string>();
+    const auto safePath = Json::parse(created->body)["safe"]["path"].get<std::string>();
+
+    // страницу "отдает" обработчик: пока запрос стоит в нем, сейф блокируется
+    std::promise<void> reached;
+    std::promise<void> go;
+    struct Release { // упавший тест не должен оставить воркер ждать вечно
+        std::promise<void>& go;
+        bool done = false;
+        void now() {
+            if (!std::exchange(done, true)) {
+                go.set_value();
+            }
+        }
+        ~Release() { now(); }
+    } release{go};
+    stack.fetcher.addHtml("https://slow.example/",
+                          "<html><head><title>Медленная</title></head></html>");
+    stack.fetcher.onFetch = [&, waitForGo = go.get_future().share()](const domain::FetchRequest&) {
+        reached.set_value(); // страница одна, картинок нет: запрос будет один
+        waitForGo.wait();
+    };
+    post(c, "/api/v1/links", {{"links", {{{"url", "https://slow.example/"}}}}}, 201, bearer(token));
+    REQUIRE(reached.get_future().wait_for(std::chrono::seconds(30)) == std::future_status::ready);
+    post(c, "/api/v1/safe/lock", Json::object(), 204, bearer(token)); // сеть lock не задерживает
+    release.now();
+    stack.services.links->drain();
+
+    const auto session =
+        post(c, "/api/v1/safe/unlock", {{"path", safePath}, {"password", "пароль-1"}}, 200);
+    const auto root = get(c, "/api/v1/entries", session["token"].get<std::string>());
+    REQUIRE(root["entries"].size() == 1);
+    CHECK(root["entries"][0]["name"] == "slow.example"); // название страницы не записалось
+    CHECK_FALSE(root["entries"][0].contains("previewPending"));
 }

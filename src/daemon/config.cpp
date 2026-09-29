@@ -118,6 +118,25 @@ std::optional<std::string> systemEnv(std::string_view name) {
 #endif
 }
 
+std::filesystem::path settingsFile(const EnvLookup& env) {
+#if defined(_WIN32)
+    const auto base = env("APPDATA");
+    if (!base || base->empty()) {
+        return {};
+    }
+    return domain::pathFromUtf8(*base) / "SafeBox" / "settings.ini";
+#else
+    if (const auto xdg = env("XDG_CONFIG_HOME"); xdg && !xdg->empty()) {
+        return domain::pathFromUtf8(*xdg) / "safebox" / "settings.ini";
+    }
+    const auto home = env("HOME");
+    if (!home || home->empty()) {
+        return {};
+    }
+    return domain::pathFromUtf8(*home) / ".config" / "safebox" / "settings.ini";
+#endif
+}
+
 std::filesystem::path documentsDirectory(const EnvLookup& env) {
     if (auto dir = env("SAFEBOX_SAFE_DIR"); dir && !dir->empty()) {
         return domain::pathFromUtf8(*dir);

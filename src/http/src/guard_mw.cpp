@@ -116,8 +116,9 @@ HandlerResponse guardRequest(const ApiContext& ctx, const httplib::Request& req,
         const auto text = req.get_header_value("Content-Length");
         std::uint64_t length = 0;
         const auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), length);
-        const auto maxBody =
-            req.path == kImportPlanPath ? kMaxImportJsonBytes : ctx.config.maxJsonBody;
+        const auto maxBody = req.path == kImportPlanPath || req.path == kLinksPath
+                                 ? kMaxImportJsonBytes
+                                 : ctx.config.maxJsonBody;
         if (ec != std::errc{} || length > maxBody) {
             return reject(res, 413, "payload_too_large", "Слишком большое тело запроса");
         }

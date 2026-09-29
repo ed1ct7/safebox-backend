@@ -24,7 +24,9 @@ using Json = nlohmann::json;
 
 inline constexpr std::string_view kImportPath = "/api/v1/import";
 inline constexpr std::string_view kImportPlanPath = "/api/v1/import/plan";
-// Лимит JSON плана и manifest импорта: на 100 000 файлов с длинными путями обычного лимита мало.
+inline constexpr std::string_view kLinksPath = "/api/v1/links";
+// Лимит JSON плана и manifest импорта и пачки ссылок: на 100 000 файлов (10 000 ссылок) с длинными
+// путями обычного лимита мало.
 inline constexpr std::size_t kMaxImportJsonBytes = 32 * 1024 * 1024;
 inline constexpr std::string_view kMediaPrefix = "/api/v1/media/";
 inline constexpr std::string_view kMediaCookieName = "sbx_media";
@@ -117,5 +119,7 @@ void registerImportApi(httplib::Server& server, ApiContext& ctx);
 void registerMediaApi(httplib::Server& server, ApiContext& ctx);
 void registerSearchApi(httplib::Server& server, ApiContext& ctx);
 void registerTagsApi(httplib::Server& server, ApiContext& ctx);
+void registerLinksApi(httplib::Server& server, ApiContext& ctx);
+void registerSettingsApi(httplib::Server& server, ApiContext& ctx);
 
 } // namespace safebox::http

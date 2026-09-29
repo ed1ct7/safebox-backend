@@ -13,5 +13,9 @@ namespace safebox::app {
 [[nodiscard]] std::shared_ptr<ImportExportService> makeImportExportService(Ports ports);
 [[nodiscard]] std::shared_ptr<SearchService> makeSearchService(Ports ports);
 [[nodiscard]] std::shared_ptr<TagsService> makeTagsService(Ports ports);
+[[nodiscard]] std::shared_ptr<SettingsService> makeSettingsService(Ports ports);
+// Один фоновый поток на сервис, останавливается в деструкторе.
+[[nodiscard]] std::shared_ptr<LinksService>
+makeLinksService(Ports ports, std::shared_ptr<SettingsService> settings);
 
 } // namespace safebox::app

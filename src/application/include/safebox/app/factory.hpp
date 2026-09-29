@@ -12,7 +12,9 @@
 #include "safebox/domain/ports/clock.hpp"
 #include "safebox/domain/ports/crypto.hpp"
 #include "safebox/domain/ports/media.hpp"
+#include "safebox/domain/ports/settings.hpp"
 #include "safebox/domain/ports/storage.hpp"
+#include "safebox/domain/ports/web.hpp"
 
 namespace safebox::app {
 
@@ -22,6 +24,8 @@ struct Ports {
     domain::Thumbnailer& thumbnailer;
     domain::ZipWriter& zip;
     domain::Clock& clock;
+    domain::PageFetcher& fetcher;
+    domain::SettingsStore& settings;
 };
 
 struct AppConfig {

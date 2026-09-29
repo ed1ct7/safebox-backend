@@ -36,6 +36,7 @@ sbx_add_test_executable(safebox-app-tests
     application/tag_filter_test.cpp
     application/rules_test.cpp
     application/link_preview_test.cpp
+    application/links_test.cpp
 )
 target_include_directories(safebox-app-tests PRIVATE
     "${PROJECT_SOURCE_DIR}/src/application/src" # white-box: IdlePolicy
@@ -68,6 +69,7 @@ sbx_add_test_executable(safebox-infra-tests
     infra/crypto_test.cpp
     infra/media_zip_test.cpp
     infra/page_fetcher_test.cpp
+    infra/settings_store_test.cpp
 )
 target_include_directories(safebox-infra-tests SYSTEM PRIVATE "${Stb_INCLUDE_DIR}")
 target_include_directories(safebox-infra-tests PRIVATE
@@ -88,6 +90,7 @@ sbx_add_test_executable(safebox-integration-tests
 target_link_libraries(safebox-integration-tests PRIVATE
     safebox-http
     safebox-infra
+    safebox-test-fakes
     httplib::httplib
     nlohmann_json::nlohmann_json
     miniz::miniz

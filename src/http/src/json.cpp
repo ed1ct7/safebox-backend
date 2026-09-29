@@ -148,6 +148,9 @@ Json toJson(const domain::Entry& entry) {
     if (entry.meta.kind == domain::Kind::Link) {
         j["url"] = entry.meta.url;
         j["domain"] = domain::urlHost(entry.meta.url);
+        if (entry.previewPending) {
+            j["previewPending"] = true; // нет в очереди - поля нет вовсе
+        }
     }
     return j;
 }
@@ -269,6 +272,26 @@ Json toJson(const domain::ImportResult& result) {
         {"imported", result.imported}, {"replaced", result.replaced},     {"failed", result.failed},
         {"skipped", result.skipped},   {"failures", std::move(failures)},
     };
+}
+
+Json toJson(const app::CreateLinksResult& result) {
+    Json created = Json::array();
+    for (const auto& entry : result.created) {
+        created.push_back(toJson(entry));
+    }
+    Json existing = Json::array();
+    for (const auto& link : result.existing) {
+        existing.push_back(Json{{"url", link.url}, {"entryId", link.entryId}});
+    }
+    return Json{
+        {"created", std::move(created)},
+        {"existing", std::move(existing)},
+        {"invalid", result.invalid},
+    };
+}
+
+Json toJson(const domain::AppSettings& settings) {
+    return Json{{"linkPreviews", settings.linkPreviews}};
 }
 
 } // namespace safebox::http

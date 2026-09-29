@@ -11,6 +11,8 @@ Services makeServices(Ports ports, AppConfig config) {
     services.importExport = makeImportExportService(ports);
     services.search = makeSearchService(ports);
     services.tags = makeTagsService(ports);
+    services.settings = makeSettingsService(ports);
+    services.links = makeLinksService(ports, services.settings);
     return services;
 }
 

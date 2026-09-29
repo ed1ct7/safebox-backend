@@ -1,8 +1,9 @@
 // Страницы из таблицы по адресу (без сети). Неизвестный адрес - ошибка, как недоступный сайт.
-// Считает вызовы и запоминает запрошенные адреса; можно звать из фонового потока
+// Считает вызовы и запоминает запросы; можно звать из фонового потока
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -39,9 +40,15 @@ public:
     }
 
     domain::Result<domain::FetchResponse> fetch(const domain::FetchRequest& request) override {
+        {
+            std::scoped_lock lock(mutex_);
+            ++calls;
+            requests_.push_back(request);
+        }
+        if (onFetch) {
+            onFetch(request); // вне мьютекса: обработчик может ждать, пока тест отпустит запрос
+        }
         std::scoped_lock lock(mutex_);
-        ++calls;
-        requested_.push_back(request.url);
         const auto found = pages_.find(request.url);
         if (found == pages_.end()) {
             return domain::fail(domain::Error::Code::IoError, "Сайт недоступен");
@@ -51,15 +58,26 @@ public:
 
     std::vector<std::string> requested() const {
         std::scoped_lock lock(mutex_);
-        return requested_;
+        std::vector<std::string> urls;
+        for (const auto& request : requests_) {
+            urls.push_back(request.url);
+        }
+        return urls;
+    }
+
+    std::vector<domain::FetchRequest> requests() const {
+        std::scoped_lock lock(mutex_);
+        return requests_;
     }
 
     std::atomic<int> calls{0};
+    // Вызывается в начале каждого fetch; задавать до первого запроса.
+    std::function<void(const domain::FetchRequest&)> onFetch;
 
 private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, domain::Result<domain::FetchResponse>> pages_;
-    std::vector<std::string> requested_;
+    std::vector<domain::FetchRequest> requests_;
 };
 
 } // namespace safebox::test

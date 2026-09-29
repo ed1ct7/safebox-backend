@@ -18,6 +18,7 @@ add_library(safebox-infra STATIC
     src/stream_zip_writer.cpp
     src/system_clock.cpp
     src/winhttp_page_fetcher.cpp
+    src/file_settings_store.cpp
 )
 
 target_include_directories(safebox-infra

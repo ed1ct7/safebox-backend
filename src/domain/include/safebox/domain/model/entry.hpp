@@ -73,6 +73,7 @@ struct Entry {
     // Считает каталог, в файле не лежит.
     std::size_t childCount = 0;              // прямых детей
     std::vector<InheritedTag> inheritedTags; // от предков с inherit, по возрастанию tagId
+    bool previewPending = false;             // ссылка ждет загрузки предпросмотра (у остальных нет)
 
     [[nodiscard]] bool isFolder() const noexcept { return meta.kind == Kind::Folder; }
     [[nodiscard]] bool hasThumbnail() const noexcept { return meta.thumbBlobId.has_value(); }

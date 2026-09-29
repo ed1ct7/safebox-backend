@@ -30,8 +30,8 @@ struct MovePlan {
 };
 
 // Все проверки и разрешение конфликтов без записи в хранилище.
-Result<MovePlan> planMoveOn(const Catalog& cat, std::span<const EntryId> ids,
-                            std::optional<EntryId> parent,
+Result<MovePlan> planMoveOn(const VaultSession& session, const Catalog& cat,
+                            std::span<const EntryId> ids, std::optional<EntryId> parent,
                             const std::unordered_map<EntryId, ConflictPolicy>& resolutions) {
     if (parent && cat.find(*parent) == nullptr) {
         return fail(Error::Code::NotFound, "Объект назначения не найден");
@@ -75,7 +75,8 @@ Result<MovePlan> planMoveOn(const Catalog& cat, std::span<const EntryId> ids,
         const auto found = occupant.find(node->folded);
         auto policy = ConflictPolicy::KeepBoth;
         if (!clash && found != occupant.end()) {
-            plan.conflicts.push_back({entry.id, cat.describe(*cat.find(found->second))});
+            plan.conflicts.push_back(
+                {entry.id, describeEntry(session, cat, *cat.find(found->second))});
             if (const auto chosen = resolutions.find(entry.id); chosen != resolutions.end()) {
                 policy = chosen->second;
             }
@@ -118,13 +119,13 @@ public:
             if (node == nullptr) {
                 return fail(Error::Code::NotFound, "Объект не найден");
             }
-            out.parent = cat.describe(*node);
+            out.parent = describeEntry(ctx->session, cat, *node);
             out.path = cat.pathTo(*parent);
         }
         const auto& ids = cat.childrenOf(parent);
         out.entries.reserve(ids.size());
         for (const auto id : ids) {
-            out.entries.push_back(cat.describe(*cat.find(id)));
+            out.entries.push_back(describeEntry(ctx->session, cat, *cat.find(id)));
         }
         return out;
     }
@@ -142,7 +143,7 @@ public:
         if (node == nullptr) {
             return fail(Error::Code::NotFound, "Объект не найден");
         }
-        return (*catalog)->describe(*node);
+        return describeEntry(ctx->session, **catalog, *node);
     }
 
     Result<std::vector<FolderNode>> folders(const Lease& lease) override {
@@ -268,6 +269,8 @@ public:
             entry.childCount = node->childCount;
         }
         entry.inheritedTags = (*catalog)->inheritedTags(id);
+        entry.previewPending =
+            entry.meta.kind == domain::Kind::Link && ctx->session.previewPending(id);
         return entry;
     }
 
@@ -281,7 +284,7 @@ public:
         if (!catalog) {
             return std::unexpected(catalog.error());
         }
-        auto plan = planMoveOn(**catalog, ids, parent, {});
+        auto plan = planMoveOn(ctx->session, **catalog, ids, parent, {});
         if (!plan) {
             return std::unexpected(plan.error());
         }
@@ -297,7 +300,7 @@ public:
         if (!catalog) {
             return std::unexpected(catalog.error());
         }
-        auto plan = planMoveOn(**catalog, cmd.ids, cmd.parent, cmd.resolutions);
+        auto plan = planMoveOn(ctx->session, **catalog, cmd.ids, cmd.parent, cmd.resolutions);
         if (!plan) {
             return std::unexpected(plan.error());
         }

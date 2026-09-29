@@ -13,6 +13,8 @@
 #include <vector>
 
 #include "FakeClock.hpp"
+#include "FakePageFetcher.hpp"
+#include "FakeSettingsStore.hpp"
 #include "FakeThumbnailer.hpp"
 #include "InMemoryVaultStore.hpp"
 #include "MemZipWriter.hpp"
@@ -57,7 +59,8 @@ struct AppFixture {
         config.chunkSize = chunkSize;
         config.defaultDirectory = testSafeDir();
         config.leaseDrainTimeout = std::chrono::seconds(5);
-        services = app::makeServices({*crypto, store, thumbnailer, zip, clock}, config);
+        services = app::makeServices(
+            {*crypto, store, thumbnailer, zip, clock, fetcher, settingsStore}, config);
     }
 
     app::UnlockResult createSafe(const std::string& name = "test",
@@ -141,6 +144,8 @@ struct AppFixture {
     FakeThumbnailer thumbnailer;
     MemZipWriter zip;
     FakeClock clock;
+    FakePageFetcher fetcher;
+    FakeSettingsStore settingsStore;
     app::AppConfig config;
     app::Services services; // последним: уничтожается первым
 };

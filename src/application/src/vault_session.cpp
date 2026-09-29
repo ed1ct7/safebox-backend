@@ -92,7 +92,7 @@ std::string foldForSearch(std::string_view text) {
 }
 
 std::string uniqueName(std::string_view name, bool isFolder,
-                       const std::unordered_set<std::string>& taken) {
+                       const std::unordered_set<std::string>& taken, int* resume) {
     if (!taken.contains(foldForSearch(name))) {
         return std::string(name);
     }
@@ -100,7 +100,7 @@ std::string uniqueName(std::string_view name, bool isFolder,
     const bool hasExt = dot != std::string_view::npos && dot > 0;
     const auto stem = hasExt ? name.substr(0, dot) : name;
     const auto ext = hasExt ? name.substr(dot) : std::string_view{};
-    for (int n = 2;; ++n) {
+    for (int n = resume != nullptr ? std::max(*resume, 2) : 2;; ++n) {
         const auto suffix = " (" + std::to_string(n) + ")";
         // имя остается в пределах kMaxNameBytes: лишнее срезается с основы по границе символа
         const auto fixed = suffix.size() + ext.size();
@@ -114,6 +114,9 @@ std::string uniqueName(std::string_view name, bool isFolder,
         }
         auto candidate = std::string(keep).append(suffix).append(ext);
         if (!taken.contains(foldForSearch(candidate))) {
+            if (resume != nullptr) {
+                *resume = n;
+            }
             return candidate;
         }
     }
@@ -407,6 +410,7 @@ void VaultSession::wipe() noexcept {
         sealer = std::move(sealer_);
         catalog = std::move(catalog_);
         ++catalogGeneration_;
+        previewPending_.clear();
         for (auto& t : tokens_) {
             domain::secureWipe(t.value);
         }
@@ -463,6 +467,20 @@ void VaultSession::invalidateCatalog() noexcept {
     catalog_.reset();
 }
 
+void VaultSession::setPreviewPending(domain::EntryId id, bool pending) {
+    std::scoped_lock lock(mutex_);
+    if (pending) {
+        previewPending_.insert(id);
+    } else {
+        previewPending_.erase(id);
+    }
+}
+
+bool VaultSession::previewPending(domain::EntryId id) const {
+    std::scoped_lock lock(mutex_);
+    return previewPending_.contains(id);
+}
+
 // Lease
 
 Lease::Lease(std::shared_ptr<VaultSession> session) noexcept : session_(std::move(session)) {}
@@ -503,6 +521,14 @@ std::optional<Lease> Lease::share() const {
 }
 
 // помощники сервисов
+
+std::optional<Lease> leaseFrom(const std::weak_ptr<VaultSession>& weak) {
+    auto session = weak.lock();
+    if (!session || !session->tryAcquire()) {
+        return std::nullopt;
+    }
+    return Lease(std::move(session));
+}
 
 Result<OperationContext> contextOf(const Lease& lease) {
     VaultSession* session = lease.session();
@@ -573,6 +599,44 @@ Result<VaultSession::CatalogPtr> loadCatalog(domain::VaultStore& store, const Se
 Result<VaultSession::CatalogPtr> catalogOf(const OperationContext& ctx, domain::VaultStore& store) {
     const auto& sealer = *ctx.sealer;
     return ctx.session.catalog([&store, &sealer] { return loadCatalog(store, sealer); });
+}
+
+domain::Result<domain::BlobId> writeBlob(domain::BlobStore& blobs, const Sealer& sealer,
+                                         std::uint32_t chunkSize, domain::KeyPurpose purpose,
+                                         std::span<const std::byte> data) {
+    auto writer = blobs.create();
+    if (!writer) {
+        return std::unexpected(writer.error());
+    }
+    const auto id = (*writer)->id();
+    const auto discard = [&](const domain::Error& e) -> domain::Result<domain::BlobId> {
+        (void)blobs.discard(id);
+        return std::unexpected(e);
+    };
+    const auto count = domain::chunkCountFor(data.size(), chunkSize);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const auto from = std::size_t{i} * chunkSize;
+        const auto part = data.subspan(from, std::min<std::size_t>(chunkSize, data.size() - from));
+        auto sealed = sealer.sealChunk(purpose, id, i, i + 1 == count, part);
+        if (!sealed) {
+            return discard(sealed.error());
+        }
+        if (auto st = (*writer)->append(*sealed); !st) {
+            return discard(st.error());
+        }
+    }
+    if (auto st = (*writer)->finish(data.size()); !st) {
+        return discard(st.error());
+    }
+    return id;
+}
+
+domain::Entry describeEntry(const VaultSession& session, const Catalog& catalog,
+                            const Catalog::Node& node) {
+    auto entry = catalog.describe(node);
+    entry.previewPending =
+        entry.meta.kind == domain::Kind::Link && session.previewPending(entry.id);
+    return entry;
 }
 
 } // namespace safebox::app

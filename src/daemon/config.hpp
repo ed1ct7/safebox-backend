@@ -36,6 +36,9 @@ using EnvLookup = std::function<std::optional<std::string>(std::string_view)>;
                                                  const EnvLookup& env);
 [[nodiscard]] std::optional<std::string> systemEnv(std::string_view name);
 [[nodiscard]] std::filesystem::path documentsDirectory(const EnvLookup& env);
+// Файл настроек приложения: %APPDATA%\SafeBox\settings.ini; не Windows - $XDG_CONFIG_HOME или
+// ~/.config, каталог safebox. Пусто - каталог пользователя определить не удалось.
+[[nodiscard]] std::filesystem::path settingsFile(const EnvLookup& env);
 [[nodiscard]] bool isLoopbackHost(std::string_view host);
 [[nodiscard]] std::string usage();
 

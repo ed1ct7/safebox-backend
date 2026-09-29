@@ -1,4 +1,5 @@
-// /api/v1/entries (список любой записи, правка, перенос, теги, удаление), /api/v1/folders
+// /api/v1/entries (список любой записи, правка, перенос, теги, предпросмотр ссылки, удаление),
+// /api/v1/folders
 #include "dto.hpp"
 
 namespace safebox::http {
@@ -305,6 +306,24 @@ void registerEntriesApi(httplib::Server& server, ApiContext& ctx) {
                         return;
                     }
                     sendJson(res, toJson(*moved));
+                });
+
+    server.Post("/api/v1/entries/:id/preview",
+                [&ctx](const httplib::Request& req, httplib::Response& res) {
+                    auto lease = requireApi(ctx, req, res);
+                    if (!lease) {
+                        return;
+                    }
+                    const auto id = pathId(req, res);
+                    if (!id) {
+                        return;
+                    }
+                    auto entry = ctx.services.links->refreshPreview(*lease, *id);
+                    if (!entry) {
+                        sendError(res, entry.error());
+                        return;
+                    }
+                    sendJson(res, toJson(*entry));
                 });
 
     server.Post("/api/v1/entries/tags", [&ctx](const httplib::Request& req,

@@ -1169,6 +1169,273 @@ TEST_CASE("zip names: folder.zip, and 'name (вложения).zip' for an entry
     CHECK(file.body == "0123456789ABCDEF");
 }
 
+TEST_CASE("POST /links creates links and answers 201 with the documented DTO",
+          "[http][links][UF-20]") {
+    HttpFixture f;
+    auto& links = *f.fakes.links;
+    auto created = makeEntry(10, 5, domain::Kind::Link, "example.com");
+    created.meta.url = "https://example.com/a";
+    created.previewPending = true;
+    links.createResult.created = {created};
+    links.createResult.existing = {{"https://old.example/", 3}};
+    links.createResult.invalid = {"не адрес"};
+
+    auto r = f.api("POST", "/api/v1/links",
+                   R"({"parentId":5,"links":[{"url":"https://example.com/a"},)"
+                   R"({"url":"https://b.example/","name":"Имя","path":"Закладки/Работа"}]})");
+    REQUIRE(r.status == 201);
+    const auto body = r.json();
+    REQUIRE(body["created"].size() == 1);
+    const auto& entry = body["created"][0];
+    CHECK(entry["id"] == 10);
+    CHECK(entry["parentId"] == 5);
+    CHECK(entry["kind"] == "link");
+    CHECK(entry["name"] == "example.com");
+    CHECK(entry["url"] == "https://example.com/a");
+    CHECK(entry["domain"] == "example.com");
+    CHECK(entry["previewPending"] == true);
+    REQUIRE(body["existing"].size() == 1);
+    CHECK(body["existing"][0] == http::Json({{"url", "https://old.example/"}, {"entryId", 3}}));
+    CHECK(body["invalid"] == http::Json::array({"не адрес"}));
+
+    REQUIRE(links.lastCreate.has_value());
+    CHECK(links.lastCreate->parent == 5);
+    REQUIRE(links.lastCreate->links.size() == 2);
+    CHECK(links.lastCreate->links[0].url == "https://example.com/a");
+    CHECK_FALSE(links.lastCreate->links[0].name.has_value());
+    CHECK(links.lastCreate->links[0].path.empty());
+    CHECK(links.lastCreate->links[1].name == "Имя");
+    CHECK(links.lastCreate->links[1].path == "Закладки/Работа");
+}
+
+TEST_CASE("POST /links: the parent is optional, null means the root", "[http][links][UF-20]") {
+    HttpFixture f;
+    for (const auto* body : {R"({"links":[{"url":"https://a.example/"}]})",
+                             R"({"parentId":null,"links":[{"url":"https://a.example/"}]})"}) {
+        f.fakes.links->lastCreate.reset();
+        REQUIRE(f.api("POST", "/api/v1/links", body).status == 201);
+        REQUIRE(f.fakes.links->lastCreate.has_value());
+        CHECK_FALSE(f.fakes.links->lastCreate->parent.has_value());
+    }
+    auto none = f.api("POST", "/api/v1/links", R"({"links":[]})");
+    CHECK(none.status == 201);
+    CHECK(none.json()["created"].empty());
+}
+
+TEST_CASE("POST /links refuses a malformed body, and the service errors map as usual",
+          "[http][links][UF-20]") {
+    HttpFixture f;
+    const auto bad = [&](const std::string& body) {
+        f.fakes.links->lastCreate.reset();
+        auto r = f.api("POST", "/api/v1/links", body);
+        CAPTURE(body);
+        CHECK(r.status == 400);
+        CHECK(r.errorCode() == "bad_request");
+        CHECK_FALSE(f.fakes.links->lastCreate.has_value());
+    };
+    bad(R"({"links":)");
+    bad(R"([])");
+    bad(R"({})");
+    bad(R"({"links":{}})");
+    bad(R"({"links":"https://a.example/"})");
+    bad(R"({"links":["https://a.example/"]})");
+    bad(R"({"links":[{}]})");
+    bad(R"({"links":[{"url":5}]})");
+    bad(R"({"links":[{"url":null}]})");
+    bad(R"({"links":[{"url":"https://a.example/","name":5}]})");
+    bad(R"({"links":[{"url":"https://a.example/","path":["a"]}]})");
+    bad(R"({"parentId":"5","links":[]})");
+    bad(R"({"parentId":0,"links":[]})");
+    bad(R"({"parentId":-3,"links":[]})");
+    bad(R"({"parentId":1.5,"links":[]})");
+    // хотя бы одна плохая ссылка - весь запрос отклонен, ничего не создано
+    bad(R"({"links":[{"url":"https://a.example/"},{"name":"без адреса"}]})");
+
+    f.fakes.links->error = domain::Error{Code::NotFound, "Объект не найден"};
+    auto missing = f.api("POST", "/api/v1/links", R"({"parentId":99,"links":[]})");
+    CHECK(missing.status == 404);
+    f.fakes.links->error =
+        domain::Error{Code::InvalidArgument, "Не больше 10 000 ссылок за один раз"};
+    auto many = f.api("POST", "/api/v1/links", R"({"links":[]})");
+    CHECK(many.status == 422);
+    CHECK(many.errorCode() == "invalid_argument");
+
+    CHECK(f.request("POST", "/api/v1/links", {"Content-Type: application/json"}, R"({"links":[]})")
+              .status == 401);
+    f.fakes.links->error.reset();
+    CHECK(f.api("POST", "/api/v1/links", R"({"links":[]})", {"Origin: https://evil.example"})
+              .status == 403);
+}
+
+TEST_CASE("POST /links takes a big body, other JSON routes keep the small limit",
+          "[http][links][UF-20]") {
+    HttpFixture f;
+    std::string body = R"({"links":[)";
+    constexpr std::size_t kCount = 10'000;
+    for (std::size_t i = 0; i < kCount; ++i) {
+        body += i == 0 ? "" : ",";
+        body +=
+            R"({"url":"https://site)" + std::to_string(i) + R"(.example/page","path":"Закладки"})";
+    }
+    body += "]}";
+    REQUIRE(body.size() > 100 * 1024); // намного больше лимита JSON (1 КиБ в тесте)
+
+    auto r = f.api("POST", "/api/v1/links", body);
+    REQUIRE(r.status == 201);
+    REQUIRE(f.fakes.links->lastCreate.has_value());
+    CHECK(f.fakes.links->lastCreate->links.size() == kCount);
+    CHECK(f.fakes.links->lastCreate->links.back().url == "https://site9999.example/page");
+    CHECK(f.api("POST", "/api/v1/entries/move/plan", body).status == 413);
+}
+
+TEST_CASE("previewPending is printed on links that are queued, and only there",
+          "[http][links][UF-21]") {
+    HttpFixture f;
+    CHECK_FALSE(f.api("GET", "/api/v1/entries/3").json().contains("previewPending"));
+    f.fakes.entries->entries[3].previewPending = true;
+
+    CHECK(f.api("GET", "/api/v1/entries/3").json()["previewPending"] == true);
+    const auto listing = f.api("GET", "/api/v1/entries").json();
+    for (const auto& entry : listing["entries"]) {
+        CHECK(entry.contains("previewPending") == (entry["id"] == 3));
+    }
+    // не ссылка поля не получает, даже если признак поставили
+    f.fakes.entries->entries[2].previewPending = true;
+    CHECK_FALSE(f.api("GET", "/api/v1/entries/2").json().contains("previewPending"));
+}
+
+TEST_CASE("POST /entries/:id/preview answers with the entry and maps failures",
+          "[http][links][UF-21]") {
+    HttpFixture f;
+    f.fakes.links->refreshed.name = "Загруженное название";
+    f.fakes.links->refreshed.meta.url = "https://example.com/a";
+    f.fakes.links->refreshed.meta.description = "Описание страницы";
+    f.fakes.links->refreshed.meta.thumbBlobId = 12;
+
+    auto ok = f.api("POST", "/api/v1/entries/3/preview");
+    REQUIRE(ok.status == 200);
+    CHECK(ok.json()["name"] == "Загруженное название");
+    CHECK(ok.json()["description"] == "Описание страницы");
+    CHECK(ok.json()["hasThumbnail"] == true);
+    CHECK(ok.json()["kind"] == "link");
+    CHECK_FALSE(ok.json().contains("previewPending"));
+    CHECK(f.fakes.links->lastPreviewId == 3);
+
+    // причина по-русски доезжает до клиента
+    f.fakes.links->error = domain::Error{Code::PreviewFailed, "Сайт не ответил за 8 секунд"};
+    auto failed = f.api("POST", "/api/v1/entries/3/preview");
+    CHECK(failed.status == 502);
+    CHECK(failed.errorCode() == "preview_failed");
+    CHECK(failed.json()["error"]["message"] == "Сайт не ответил за 8 секунд");
+
+    f.fakes.links->error =
+        domain::Error{Code::InvalidArgument, "Предпросмотр есть только у ссылок"};
+    CHECK(f.api("POST", "/api/v1/entries/2/preview").status == 422);
+    f.fakes.links->error = domain::Error{Code::NotFound, "Объект не найден"};
+    CHECK(f.api("POST", "/api/v1/entries/404/preview").status == 404);
+    f.fakes.links->error.reset();
+
+    CHECK(f.api("POST", "/api/v1/entries/abc/preview").status == 400);
+    CHECK(f.api("POST", "/api/v1/entries/0/preview").status == 400);
+    CHECK(f.request("POST", "/api/v1/entries/3/preview").status == 401);
+    CHECK(f.request("POST", "/api/v1/entries/3/preview", {"Origin: https://evil.example"}).status ==
+          403);
+}
+
+TEST_CASE("GET and PATCH /settings need the Bearer token and speak the documented DTO",
+          "[http][settings][UF-22]") {
+    HttpFixture f;
+    auto initial = f.api("GET", "/api/v1/settings");
+    REQUIRE(initial.status == 200);
+    CHECK(initial.json() == http::Json({{"linkPreviews", true}}));
+
+    auto off = f.api("PATCH", "/api/v1/settings", R"({"linkPreviews":false})");
+    REQUIRE(off.status == 200);
+    CHECK(off.json() == http::Json({{"linkPreviews", false}}));
+    CHECK_FALSE(f.fakes.settings->settings.linkPreviews);
+    CHECK(f.api("GET", "/api/v1/settings").json()["linkPreviews"] == false);
+
+    // лишние поля не мешают; включить обратно
+    auto on = f.api("PATCH", "/api/v1/settings", R"({"linkPreviews":true,"theme":"dark"})");
+    CHECK(on.json() == http::Json({{"linkPreviews", true}}));
+    CHECK(f.fakes.settings->updates == 2);
+
+    // как весь API: без Bearer (и только с cookie медиа) не пускает
+    CHECK(f.request("GET", "/api/v1/settings").status == 401);
+    CHECK(f.request("PATCH", "/api/v1/settings", {"Content-Type: application/json"},
+                    R"({"linkPreviews":false})")
+              .status == 401);
+    CHECK(f.request("GET", "/api/v1/settings", {"Cookie: sbx_media=" + std::string(kMediaToken)})
+              .status == 401);
+    CHECK(f.fakes.settings->settings.linkPreviews); // отказ ничего не изменил
+    CHECK(f.api("PATCH", "/api/v1/settings", R"({"linkPreviews":true})",
+                {"Origin: https://evil.example"})
+              .status == 403);
+
+    f.fakes.safe->unlocked = false; // токен мертв - настройки закрыты, как и все остальное
+    CHECK(f.api("GET", "/api/v1/settings").status == 401);
+}
+
+TEST_CASE("PATCH /settings refuses a wrong body and reports a failed save",
+          "[http][settings][UF-22]") {
+    HttpFixture f;
+    for (const auto* body : {R"({})", R"({"linkPreviews":"yes"})", R"({"linkPreviews":0})",
+                             R"({"linkPreviews":null})", R"([])", R"({"linkPreviews":)"}) {
+        auto r = f.api("PATCH", "/api/v1/settings", body);
+        CAPTURE(body);
+        CHECK(r.status == 400);
+        CHECK(r.errorCode() == "bad_request");
+    }
+    CHECK(f.fakes.settings->updates == 0);
+
+    f.fakes.settings->error = domain::Error{Code::IoError, "Не удалось сохранить настройки"};
+    auto failed = f.api("PATCH", "/api/v1/settings", R"({"linkPreviews":false})");
+    CHECK(failed.status == 500);
+    CHECK(failed.errorCode() == "io_error");
+    CHECK(failed.json()["error"]["message"] == "Не удалось сохранить настройки");
+    CHECK(f.api("GET", "/api/v1/settings").json()["linkPreviews"] == true);
+}
+
+TEST_CASE("a link without content downloads as a .url shortcut", "[http][media][UF-20]") {
+    HttpFixture f;
+    // "site.url" уже с расширением: второе не добавляется
+    auto shortcut = f.api("GET", "/api/v1/media/3/download");
+    REQUIRE(shortcut.status == 200);
+    CHECK(shortcut.body == "[InternetShortcut]\r\nURL=https://Example.com:8443/page\r\n");
+    CHECK(shortcut.header("content-type") == "application/octet-stream");
+    CHECK(shortcut.header("content-disposition") ==
+          "attachment; filename=\"site.url\"; filename*=UTF-8''site.url");
+    CHECK(shortcut.header("x-content-type-options") == "nosniff");
+
+    // имя без расширения и не ASCII
+    auto named = makeEntry(5, std::nullopt, domain::Kind::Link, "Моя закладка");
+    named.meta.url = "https://example.com/a?b=1&c=2";
+    f.fakes.entries->entries[5] = named;
+    auto cyrillic = f.api("GET", "/api/v1/media/5/download");
+    REQUIRE(cyrillic.status == 200);
+    CHECK(cyrillic.body == "[InternetShortcut]\r\nURL=https://example.com/a?b=1&c=2\r\n");
+    CHECK(
+        cyrillic.header("content-disposition")
+            .ends_with("filename*=UTF-8''%D0%9C%D0%BE%D1%8F%20%D0%B7%D0%B0%D0%BA%D0%BB%D0%B0%D0%B4"
+                       "%D0%BA%D0%B0.url"));
+
+    // расширение в другом регистре тоже считается
+    f.fakes.entries->entries[5].name = "Site.URL";
+    CHECK(f.api("GET", "/api/v1/media/5/download").header("content-disposition") ==
+          "attachment; filename=\"Site.URL\"; filename*=UTF-8''Site.URL");
+
+    // ссылка с блобом (импортированный ярлык) скачивается как обычный файл
+    f.fakes.entries->entries[5].meta.blobId = 77;
+    auto blob = f.api("GET", "/api/v1/media/5/download");
+    REQUIRE(blob.status == 200);
+    CHECK(blob.body == "0123456789ABCDEF");
+
+    // ярлык скачивается и по cookie медиа: запрос идет из браузера
+    CHECK(f.request("GET", "/api/v1/media/3/download",
+                    {"Cookie: sbx_media=" + std::string(kMediaToken)})
+              .status == 200);
+}
+
 TEST_CASE("frontend assets and unknown routes", "[http][assets]") {
     HttpFixture f;
     auto stub = f.request("GET", "/");
