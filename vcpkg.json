@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "safebox",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "dependencies": [
     "libsodium",
     "sqlite3",

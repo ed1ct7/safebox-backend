@@ -13,7 +13,7 @@ if(SAFEBOX_BUILD_TESTS)
 endif()
 set(SAFEBOX_WEB_DIST "" CACHE PATH "frontend/dist to embed into safeboxd")  # пусто = только API
 
-project(safebox VERSION 2.0.0 LANGUAGES CXX)
+project(safebox VERSION 2.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)   # нет молчательного отката на более старый стандарт
