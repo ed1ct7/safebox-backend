@@ -309,8 +309,6 @@ public:
 
 // SearchService
 
-inline constexpr std::size_t kDefaultSearchLimit = 200;
-
 // Как сочетаются выбранные теги.
 enum class TagMatch {
     Categories, // И между категориями, ИЛИ внутри категории
@@ -322,8 +320,8 @@ struct SearchQuery {
     std::string text; // может быть пустым, если заданы теги
     std::vector<domain::TagId> tags;
     TagMatch match = TagMatch::Categories;
-    std::optional<domain::EntryId> within;   // только потомки этой записи, ее самой в выдаче нет
-    std::size_t limit = kDefaultSearchLimit; // 0 - по умолчанию
+    std::optional<domain::EntryId> within; // только потомки этой записи, ее самой в выдаче нет
+    std::size_t limit = 0;                 // 0 - без ограничения
 };
 
 class SearchService {
@@ -331,8 +329,8 @@ public:
     virtual ~SearchService() = default;
 
     // Текст - без учета регистра (кириллица включительно, "ё" = "е") в имени, иначе в описании;
-    // теги - по прямым и унаследованным. Пусто и то и другое -> []. Неизвестный тег ->
-    // InvalidArgument, неизвестный within -> NotFound.
+    // теги - по прямым и унаследованным. Пусто и то и другое -> []. limit = 0 - выдать все
+    // совпадения. Неизвестный тег -> InvalidArgument, неизвестный within -> NotFound.
     [[nodiscard]] virtual Result<std::vector<domain::SearchHit>>
     search(const Lease& lease, const SearchQuery& query) = 0;
 };

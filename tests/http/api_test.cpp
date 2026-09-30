@@ -606,12 +606,12 @@ TEST_CASE("search takes tags, match mode and scope", "[http][search][UF-18]") {
     CHECK(r.json()["query"] == "a");
     CHECK(r.json()["results"].size() == 1);
 
-    // по умолчанию: без тегов, И между категориями, весь сейф
+    // по умолчанию: без тегов, И между категориями, весь сейф без ограничения
     f.api("GET", "/api/v1/search?q=a");
     CHECK(query.tags.empty());
     CHECK(query.match == app::TagMatch::Categories);
     CHECK_FALSE(query.within.has_value());
-    CHECK(query.limit == app::kDefaultSearchLimit);
+    CHECK(query.limit == 0);
     // одни теги, без текста; запятая может прийти закодированной
     auto tagsOnly = f.api("GET", "/api/v1/search?tags=5%2C6&match=all");
     CHECK(tagsOnly.status == 200);

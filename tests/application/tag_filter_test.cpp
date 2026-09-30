@@ -206,7 +206,7 @@ TEST_CASE("the limit applies after sorting", "[search][tags]") {
     FilterVault v;
     auto two = v.find({.tags = {v.crimea}, .limit = 2});
     CHECK(v.namesOf(two) == Names{"Море", "Отпуск"});            // папки первыми
-    CHECK(v.find({.tags = {v.crimea}, .limit = 0}).size() == 5); // 0 - по умолчанию
+    CHECK(v.find({.tags = {v.crimea}, .limit = 0}).size() == 5); // 0 - без ограничения
     CHECK(v.find({.tags = {v.crimea}, .limit = 5000}).size() == 5);
 }
 

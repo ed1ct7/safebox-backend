@@ -16,8 +16,6 @@ using domain::Error;
 using domain::fail;
 using domain::TagId;
 
-constexpr std::size_t kMaxSearchLimit = 1000;
-
 // Запись подходит, если из каждой группы у нее есть хотя бы один тег.
 using TagGroups = std::vector<std::vector<TagId>>;
 
@@ -146,10 +144,8 @@ public:
             }
             return a.entry.id < b.entry.id;
         });
-        const auto cap =
-            query.limit == 0 ? kDefaultSearchLimit : std::min(query.limit, kMaxSearchLimit);
-        if (matches.size() > cap) {
-            matches.resize(cap);
+        if (query.limit != 0 && matches.size() > query.limit) {
+            matches.resize(query.limit);
         }
 
         std::vector<domain::SearchHit> hits;

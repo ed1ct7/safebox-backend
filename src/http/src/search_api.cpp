@@ -1,4 +1,5 @@
 // GET /api/v1/search?q=&tags=1,2,3&match=categories|all|any&within=<id>&limit=
+// Без limit выдаются все совпадения; limit, если задан, должен быть >= 1.
 #include <charconv>
 
 #include "dto.hpp"

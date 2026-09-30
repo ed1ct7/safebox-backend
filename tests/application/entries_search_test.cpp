@@ -166,6 +166,25 @@ TEST_CASE("search finds names anywhere, case-insensitively", "[search][UF-8]") {
     CHECK(stale->empty());
 }
 
+TEST_CASE("search without limit returns every match", "[search][UF-8]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    // больше старого лимита по умолчанию (200)
+    std::vector<ImportFile> files;
+    for (int i = 0; i < 250; ++i) {
+        files.push_back({.path = "bulk" + std::to_string(i) + ".txt", .data = "d"});
+    }
+    REQUIRE(f.importFiles(s, files).imported == 250);
+
+    auto all = f.services.search->search(f.lease(s), {.text = "bulk"});
+    REQUIRE(all.has_value());
+    CHECK(all->size() == 250);
+
+    auto trimmed = f.services.search->search(f.lease(s), {.text = "bulk", .limit = 200});
+    REQUIRE(trimmed.has_value());
+    CHECK(trimmed->size() == 200);
+}
+
 TEST_CASE("services refuse to work after lock", "[entries][UF-13]") {
     AppFixture f;
     auto s = f.createSafe();
