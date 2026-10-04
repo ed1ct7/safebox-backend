@@ -139,14 +139,14 @@ inline void checkTagRepository(domain::VaultStore& store) {
         cat1 = tags.insertCategory().value();
         cat2 = tags.insertCategory().value();
         CHECK(cat2 > cat1);
-        REQUIRE(tags.updateCategory(cat1, domain::toBytes("cat-one")).has_value());
-        REQUIRE(tags.updateCategory(cat2, domain::toBytes("cat-two")).has_value());
+        REQUIRE(tags.updateCategory(cat1, domain::toBytes("cat-one"), {}).has_value());
+        REQUIRE(tags.updateCategory(cat2, domain::toBytes("cat-two"), {}).has_value());
         tag1 = tags.insertTag(cat1).value();
         tag2 = tags.insertTag(cat1).value();
         tag3 = tags.insertTag(cat2).value();
-        REQUIRE(tags.updateTag(tag1, cat1, domain::toBytes("t1")).has_value());
-        REQUIRE(tags.updateTag(tag2, cat1, domain::toBytes("t2")).has_value());
-        REQUIRE(tags.updateTag(tag3, cat2, domain::toBytes("t3")).has_value());
+        REQUIRE(tags.updateTag(tag1, cat1, domain::toBytes("t1"), {}).has_value());
+        REQUIRE(tags.updateTag(tag2, cat1, domain::toBytes("t2"), {}).has_value());
+        REQUIRE(tags.updateTag(tag3, cat2, domain::toBytes("t3"), {}).has_value());
         REQUIRE((*uow)->commit().has_value());
     }
     {
@@ -168,14 +168,14 @@ inline void checkTagRepository(domain::VaultStore& store) {
 
         // нет такой категории или тега
         CHECK(tags.insertTag(9999).error().code == Code::NotFound);
-        CHECK(tags.updateTag(tag1, 9999, domain::toBytes("x")).error().code == Code::NotFound);
-        CHECK(tags.updateTag(9999, cat1, domain::toBytes("x")).error().code == Code::NotFound);
-        CHECK(tags.updateCategory(9999, domain::toBytes("x")).error().code == Code::NotFound);
+        CHECK(tags.updateTag(tag1, 9999, domain::toBytes("x"), {}).error().code == Code::NotFound);
+        CHECK(tags.updateTag(9999, cat1, domain::toBytes("x"), {}).error().code == Code::NotFound);
+        CHECK(tags.updateCategory(9999, domain::toBytes("x"), {}).error().code == Code::NotFound);
         CHECK(tags.removeTag(9999).error().code == Code::NotFound);
         CHECK(tags.removeCategory(9999).error().code == Code::NotFound);
 
         // перенос тега в другую категорию и удаление - без commit откатываются
-        REQUIRE(tags.updateTag(tag2, cat2, domain::toBytes("t2-moved")).has_value());
+        REQUIRE(tags.updateTag(tag2, cat2, domain::toBytes("t2-moved"), {}).has_value());
         REQUIRE(tags.removeTag(tag3).has_value());
         CHECK(tags.tags()->size() == 2);
     }
@@ -188,7 +188,7 @@ inline void checkTagRepository(domain::VaultStore& store) {
         CHECK((*all)[1].encName == domain::toBytes("t2"));
 
         // удаление категории уносит ее теги, чужие не трогает
-        REQUIRE(tags.updateTag(tag2, cat2, domain::toBytes("t2-moved")).has_value());
+        REQUIRE(tags.updateTag(tag2, cat2, domain::toBytes("t2-moved"), {}).has_value());
         REQUIRE(tags.removeCategory(cat1).has_value());
         REQUIRE((*uow)->commit().has_value());
     }

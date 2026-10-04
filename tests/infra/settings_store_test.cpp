@@ -13,7 +13,8 @@ TEST_CASE("no settings file means the defaults", "[settings]") {
     auto store = infra::makeFileSettingsStore(dir / "settings.ini");
     auto loaded = store->load();
     REQUIRE(loaded.has_value());
-    CHECK(loaded->linkPreviews);                                // предпросмотр по умолчанию включен
+    CHECK(loaded->linkPreviews); // предпросмотр по умолчанию включен
+    CHECK(loaded->tagLanguage == domain::TagLanguage::Ru);
     CHECK_FALSE(std::filesystem::exists(dir / "settings.ini")); // чтение файл не создает
 }
 
@@ -23,12 +24,12 @@ TEST_CASE("saved settings are read back, also by a new store", "[settings]") {
     auto store = infra::makeFileSettingsStore(file);
 
     REQUIRE(store->save(AppSettings{false}).has_value());
-    CHECK(test::readFile(file) == "linkPreviews=0\n");
+    CHECK(test::readFile(file) == "linkPreviews=0\ntagLanguage=ru\n");
     CHECK_FALSE(store->load()->linkPreviews);
     CHECK_FALSE(infra::makeFileSettingsStore(file)->load()->linkPreviews);
 
     REQUIRE(store->save(AppSettings{true}).has_value());
-    CHECK(test::readFile(file) == "linkPreviews=1\n");
+    CHECK(test::readFile(file) == "linkPreviews=1\ntagLanguage=ru\n");
     CHECK(infra::makeFileSettingsStore(file)->load()->linkPreviews);
 }
 
@@ -51,7 +52,7 @@ TEST_CASE("a save replaces the previous file completely", "[settings]") {
     const auto file = dir / "settings.ini";
     test::writeFile(file, "linkPreviews=1\nстарая строка, которая не должна остаться\n");
     REQUIRE(infra::makeFileSettingsStore(file)->save(AppSettings{false}).has_value());
-    CHECK(test::readFile(file) == "linkPreviews=0\n");
+    CHECK(test::readFile(file) == "linkPreviews=0\ntagLanguage=ru\n");
 }
 
 TEST_CASE("the file format tolerates comments, spaces, unknown keys and bad values", "[settings]") {

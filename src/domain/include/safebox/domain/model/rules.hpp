@@ -245,6 +245,15 @@ namespace detail {
     return std::string(clean);
 }
 
+// Вторая локализация имени (английское): пустая/из одних пробелов строка означает
+// "не задано" - поле очищается. Непустое проходит те же правила, что и основное имя.
+[[nodiscard]] inline Result<std::string> validateOptionalTagName(std::string_view name) {
+    if (detail::trim(name).empty()) {
+        return std::string{};
+    }
+    return validateTagName(name);
+}
+
 // Имя из импорта: запрещенные символы и битый UTF-8 -> '_', пробелы по краям
 // срезаются, длина режется по границе символа. Результат всегда проходит
 // validateName.

@@ -249,6 +249,7 @@ struct CategoryWithTags {
 struct CreateTagCmd {
     std::string category; // имя категории, не id
     std::string name;
+    std::string nameEn;          // вторая локализация; пусто - не задана
     bool createCategory = false; // нет такой категории: создать вместо NotFound
 };
 
@@ -259,7 +260,14 @@ struct CreatedTag {
 
 struct UpdateTagCmd {
     std::optional<std::string> name;
+    std::optional<std::string> nameEn; // вторая локализация; "" - очистить, nullopt - не менять
     std::optional<domain::CategoryId> categoryId; // перенос в другую категорию
+};
+
+// Переименование категории: оба поля опциональны; nameEn "" - очистить, nullopt - не менять.
+struct RenameCategoryCmd {
+    std::optional<std::string> name;
+    std::optional<std::string> nameEn;
 };
 
 struct RemovedTags {
@@ -281,11 +289,11 @@ public:
 
     // Категории и теги в них по имени.
     [[nodiscard]] virtual Result<std::vector<CategoryWithTags>> list(const Lease& lease) = 0;
-    // Дубль имени -> AlreadyExists, плохое имя -> InvalidArgument.
-    [[nodiscard]] virtual Result<domain::TagCategory> createCategory(const Lease& lease,
-                                                                     std::string_view name) = 0;
+    // Дубль имени (по любой локализации) -> AlreadyExists, плохое имя -> InvalidArgument.
+    [[nodiscard]] virtual Result<domain::TagCategory>
+    createCategory(const Lease& lease, std::string_view name, std::string_view nameEn = {}) = 0;
     [[nodiscard]] virtual Result<CategoryWithTags>
-    renameCategory(const Lease& lease, domain::CategoryId id, std::string_view name) = 0;
+    renameCategory(const Lease& lease, domain::CategoryId id, const RenameCategoryCmd& cmd) = 0;
     // Категория и ее теги; теги снимаются со всех записей.
     [[nodiscard]] virtual Result<RemovedTags> removeCategory(const Lease& lease,
                                                              domain::CategoryId id) = 0;

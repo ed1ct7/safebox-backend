@@ -337,17 +337,18 @@ public:
         return categories;
     }
 
-    app::Result<domain::TagCategory> createCategory(const app::Lease&,
-                                                    std::string_view name) override {
+    app::Result<domain::TagCategory> createCategory(const app::Lease&, std::string_view name,
+                                                    std::string_view nameEn) override {
         if (error) {
             return std::unexpected(*error);
         }
         lastName = std::string(name);
-        return domain::TagCategory{3, std::string(name)};
+        return domain::TagCategory{3, std::string(name), std::string(nameEn)};
     }
 
     app::Result<app::CategoryWithTags> renameCategory(const app::Lease&, domain::CategoryId id,
-                                                      std::string_view name) override {
+                                                      const app::RenameCategoryCmd& cmd) override {
+        const auto name = cmd.name.value_or("");
         if (error) {
             return std::unexpected(*error);
         }

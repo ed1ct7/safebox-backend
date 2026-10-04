@@ -19,9 +19,10 @@
 
 namespace safebox::domain {
 
-// Строка таблицы meta.
+// Строка таблицы meta. formatVersion - версия раскладки шифрополей (kSealVersion):
+// входит в AAD конверта, при миграциях схемы не меняется.
 struct SafeMeta {
-    std::uint32_t formatVersion = kFormatVersion;
+    std::uint32_t formatVersion = kSealVersion;
     KdfParams kdf;
     Bytes salt;
     std::uint32_t chunkSize = kDefaultChunkSize;
@@ -89,15 +90,18 @@ public:
 };
 
 // Зашифрованные строки таблиц tag_categories и tags. category_id открыт и входит в AAD имени тега.
+// encNameEn - вторая локализация имени; пустой блоб - не задана (схема v3).
 struct TagCategoryRecord {
     CategoryId id = 0;
     Bytes encName;
+    Bytes encNameEn;
 };
 
 struct TagRecord {
     TagId id = 0;
     CategoryId categoryId = 0;
     Bytes encName;
+    Bytes encNameEn;
 };
 
 class TagRepository {
@@ -106,16 +110,17 @@ public:
 
     // Имя вставляется пустым и запечатывается по полученному id (updateCategory/updateTag).
     [[nodiscard]] virtual Result<CategoryId> insertCategory() = 0;
-    [[nodiscard]] virtual Status updateCategory(CategoryId id,
-                                                std::span<const std::byte> encName) = 0;
+    [[nodiscard]] virtual Status updateCategory(CategoryId id, std::span<const std::byte> encName,
+                                                std::span<const std::byte> encNameEn) = 0;
     // Категория и каскадом ее теги; NotFound - нет такой.
     [[nodiscard]] virtual Status removeCategory(CategoryId id) = 0;
     [[nodiscard]] virtual Result<std::vector<TagCategoryRecord>> categories() = 0;
     // NotFound - нет категории.
     [[nodiscard]] virtual Result<TagId> insertTag(CategoryId category) = 0;
-    // Перенос тега в другую категорию = смена category_id вместе с перезапечатанным именем.
+    // Перенос тега в другую категорию = смена category_id вместе с перезапечатанными именами.
     [[nodiscard]] virtual Status updateTag(TagId id, CategoryId category,
-                                           std::span<const std::byte> encName) = 0;
+                                           std::span<const std::byte> encName,
+                                           std::span<const std::byte> encNameEn) = 0;
     [[nodiscard]] virtual Status removeTag(TagId id) = 0; // NotFound - нет такого
     [[nodiscard]] virtual Result<std::vector<TagRecord>> tags() = 0;
 };

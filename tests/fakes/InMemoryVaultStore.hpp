@@ -327,12 +327,14 @@ private:
             }
 
             domain::Status updateCategory(domain::CategoryId id,
-                                          std::span<const std::byte> encName) override {
+                                          std::span<const std::byte> encName,
+                                          std::span<const std::byte> encNameEn) override {
                 const auto it = work_.categories.find(id);
                 if (it == work_.categories.end()) {
                     return domain::fail(domain::Error::Code::NotFound, "Категория не найдена");
                 }
                 it->second.encName.assign(encName.begin(), encName.end());
+                it->second.encNameEn.assign(encNameEn.begin(), encNameEn.end());
                 return {};
             }
 
@@ -363,7 +365,8 @@ private:
             }
 
             domain::Status updateTag(domain::TagId id, domain::CategoryId category,
-                                     std::span<const std::byte> encName) override {
+                                     std::span<const std::byte> encName,
+                                     std::span<const std::byte> encNameEn) override {
                 if (!work_.categories.contains(category)) {
                     return domain::fail(domain::Error::Code::NotFound, "Категория не найдена");
                 }
@@ -373,6 +376,7 @@ private:
                 }
                 it->second.categoryId = category;
                 it->second.encName.assign(encName.begin(), encName.end());
+                it->second.encNameEn.assign(encNameEn.begin(), encNameEn.end());
                 return {};
             }
 

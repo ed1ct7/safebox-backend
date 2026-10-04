@@ -313,12 +313,14 @@ public:
         return db_.lastInsertRowId();
     }
 
-    Status updateCategory(domain::CategoryId id, std::span<const std::byte> encName) override {
-        auto st = db_.cached("UPDATE tag_categories SET enc_name = ?1 WHERE id = ?2");
+    Status updateCategory(domain::CategoryId id, std::span<const std::byte> encName,
+                          std::span<const std::byte> encNameEn) override {
+        auto st =
+            db_.cached("UPDATE tag_categories SET enc_name = ?1, enc_name_en = ?2 WHERE id = ?3");
         if (!st) {
             return std::unexpected(st.error());
         }
-        (*st)->bind(1, encName).bind(2, id);
+        (*st)->bind(1, encName).bind(2, encNameEn).bind(3, id);
         return runChanging(**st, "Категория не найдена");
     }
 
@@ -332,7 +334,7 @@ public:
     }
 
     Result<std::vector<domain::TagCategoryRecord>> categories() override {
-        auto st = db_.cached("SELECT id, enc_name FROM tag_categories ORDER BY id");
+        auto st = db_.cached("SELECT id, enc_name, enc_name_en FROM tag_categories ORDER BY id");
         if (!st) {
             return std::unexpected(st.error());
         }
@@ -345,7 +347,7 @@ public:
             if (!*row) {
                 return out;
             }
-            out.push_back({(*st)->int64(0), (*st)->blob(1)});
+            out.push_back({(*st)->int64(0), (*st)->blob(1), (*st)->blob(2)});
         }
     }
 
@@ -365,15 +367,17 @@ public:
     }
 
     Status updateTag(domain::TagId id, domain::CategoryId category,
-                     std::span<const std::byte> encName) override {
+                     std::span<const std::byte> encName,
+                     std::span<const std::byte> encNameEn) override {
         if (auto found = requireCategory(category); !found) {
             return found;
         }
-        auto st = db_.cached("UPDATE tags SET category_id = ?1, enc_name = ?2 WHERE id = ?3");
+        auto st = db_.cached("UPDATE tags SET category_id = ?1, enc_name = ?2, enc_name_en = ?3"
+                             " WHERE id = ?4");
         if (!st) {
             return std::unexpected(st.error());
         }
-        (*st)->bind(1, category).bind(2, encName).bind(3, id);
+        (*st)->bind(1, category).bind(2, encName).bind(3, encNameEn).bind(4, id);
         return runChanging(**st, "Тег не найден");
     }
 
@@ -387,7 +391,7 @@ public:
     }
 
     Result<std::vector<domain::TagRecord>> tags() override {
-        auto st = db_.cached("SELECT id, category_id, enc_name FROM tags ORDER BY id");
+        auto st = db_.cached("SELECT id, category_id, enc_name, enc_name_en FROM tags ORDER BY id");
         if (!st) {
             return std::unexpected(st.error());
         }
@@ -400,7 +404,7 @@ public:
             if (!*row) {
                 return out;
             }
-            out.push_back({(*st)->int64(0), (*st)->int64(1), (*st)->blob(2)});
+            out.push_back({(*st)->int64(0), (*st)->int64(1), (*st)->blob(2), (*st)->blob(3)});
         }
     }
 
@@ -601,6 +605,9 @@ Status SqliteVaultStore::open(const std::filesystem::path& path) {
         return st;
     }
     if (auto st = verifyOpened(**db); !st) {
+        return st;
+    }
+    if (auto st = migrateIfNeeded(**db); !st) {
         return st;
     }
     conn_.db = std::move(*db);

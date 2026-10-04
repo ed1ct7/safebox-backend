@@ -134,11 +134,15 @@ Catalog::~Catalog() {
     }
     for (auto& [id, node] : categories_) {
         domain::secureWipe(node.category.name);
+        domain::secureWipe(node.category.nameEn);
         domain::secureWipe(node.folded);
+        domain::secureWipe(node.foldedEn);
     }
     for (auto& [id, node] : tags_) {
         domain::secureWipe(node.tag.name);
+        domain::secureWipe(node.tag.nameEn);
         domain::secureWipe(node.folded);
+        domain::secureWipe(node.foldedEn);
     }
 }
 
@@ -152,14 +156,17 @@ void Catalog::add(domain::Entry entry) {
 
 void Catalog::addCategory(domain::TagCategory category) {
     auto folded = foldForSearch(category.name);
+    auto foldedEn = foldForSearch(category.nameEn);
     const auto id = category.id;
-    categories_.insert_or_assign(id, CategoryNode{std::move(category), std::move(folded)});
+    categories_.insert_or_assign(
+        id, CategoryNode{std::move(category), std::move(folded), std::move(foldedEn)});
 }
 
 void Catalog::addTag(domain::Tag tag) {
     auto folded = foldForSearch(tag.name);
+    auto foldedEn = foldForSearch(tag.nameEn);
     const auto id = tag.id;
-    tags_.insert_or_assign(id, TagNode{std::move(tag), std::move(folded)});
+    tags_.insert_or_assign(id, TagNode{std::move(tag), std::move(folded), std::move(foldedEn)});
 }
 
 void Catalog::finalize() {

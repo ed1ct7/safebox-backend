@@ -218,21 +218,49 @@ Result<Bytes> Sealer::sealCategoryName(domain::CategoryId id, std::string_view n
     return crypto_.seal(keys_.names, domain::asBytes(name), domain::aad::categoryName(id));
 }
 
+// Второе имя не задано - пустой блоб без шифра (так же выглядят строки после миграции v2 -> v3).
+Result<Bytes> Sealer::sealCategoryNameEn(domain::CategoryId id, std::string_view nameEn) const {
+    if (nameEn.empty()) {
+        return Bytes{};
+    }
+    return crypto_.seal(keys_.names, domain::asBytes(nameEn), domain::aad::categoryNameEn(id));
+}
+
 Result<domain::TagCategory> Sealer::openCategory(const domain::TagCategoryRecord& record) const {
     auto name = crypto_.open(keys_.names, record.encName, domain::aad::categoryName(record.id));
     if (!name) {
         return corrupted();
     }
+    // пустой блоб - вторая локализация не задана (так все строки до миграции и новые теги)
     domain::TagCategory category;
     category.id = record.id;
     category.name.assign(domain::asChars(*name));
     domain::secureWipe(*name);
+    if (record.encNameEn.empty()) {
+        return category;
+    }
+    auto nameEn =
+        crypto_.open(keys_.names, record.encNameEn, domain::aad::categoryNameEn(record.id));
+    if (!nameEn) {
+        domain::secureWipe(category.name);
+        return corrupted();
+    }
+    category.nameEn.assign(domain::asChars(*nameEn));
+    domain::secureWipe(*nameEn);
     return category;
 }
 
 Result<Bytes> Sealer::sealTagName(domain::TagId id, domain::CategoryId category,
                                   std::string_view name) const {
     return crypto_.seal(keys_.names, domain::asBytes(name), domain::aad::tagName(id, category));
+}
+
+Result<Bytes> Sealer::sealTagNameEn(domain::TagId id, domain::CategoryId category,
+                                    std::string_view nameEn) const {
+    if (nameEn.empty()) {
+        return Bytes{};
+    }
+    return crypto_.seal(keys_.names, domain::asBytes(nameEn), domain::aad::tagNameEn(id, category));
 }
 
 Result<domain::Tag> Sealer::openTag(const domain::TagRecord& record) const {
@@ -246,6 +274,17 @@ Result<domain::Tag> Sealer::openTag(const domain::TagRecord& record) const {
     tag.categoryId = record.categoryId;
     tag.name.assign(domain::asChars(*name));
     domain::secureWipe(*name);
+    if (record.encNameEn.empty()) {
+        return tag;
+    }
+    auto nameEn = crypto_.open(keys_.names, record.encNameEn,
+                               domain::aad::tagNameEn(record.id, record.categoryId));
+    if (!nameEn) {
+        domain::secureWipe(tag.name);
+        return corrupted();
+    }
+    tag.nameEn.assign(domain::asChars(*nameEn));
+    domain::secureWipe(*nameEn);
     return tag;
 }
 

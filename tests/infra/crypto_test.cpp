@@ -77,7 +77,7 @@ TEST_CASE("envelope wraps the master key without exposing it", "[crypto][envelop
     const auto salt = crypto->generateSalt();
     auto kek = crypto->deriveKek("correct", salt, domain::kMinimalKdf).value();
     auto master = crypto->generateKey().value();
-    const auto envAad = domain::aad::envelope(domain::kFormatVersion, salt, domain::kMinimalKdf);
+    const auto envAad = domain::aad::envelope(domain::kSealVersion, salt, domain::kMinimalKdf);
     auto envelope = crypto->wrapKey(kek, master, envAad).value();
     CHECK(envelope.size() == domain::kSealOverhead + domain::kKeySize);
 
@@ -88,7 +88,7 @@ TEST_CASE("envelope wraps the master key without exposing it", "[crypto][envelop
     auto wrongKek = crypto->deriveKek("wrong", salt, domain::kMinimalKdf).value();
     CHECK(crypto->unwrapKey(wrongKek, envelope, envAad).error().code == Code::IntegrityError);
     const auto otherAad =
-        domain::aad::envelope(domain::kFormatVersion, salt, domain::KdfParams{2, 8192});
+        domain::aad::envelope(domain::kSealVersion, salt, domain::KdfParams{2, 8192});
     CHECK(crypto->unwrapKey(kek, envelope, otherAad).error().code == Code::IntegrityError);
     auto shortEnvelope = envelope;
     shortEnvelope.pop_back();

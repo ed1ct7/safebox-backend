@@ -40,11 +40,15 @@ public:
 
     [[nodiscard]] domain::Result<domain::Bytes> sealCategoryName(domain::CategoryId id,
                                                                  std::string_view name) const;
+    [[nodiscard]] domain::Result<domain::Bytes> sealCategoryNameEn(domain::CategoryId id,
+                                                                   std::string_view nameEn) const;
     [[nodiscard]] domain::Result<domain::TagCategory>
     openCategory(const domain::TagCategoryRecord& record) const;
     // category_id входит в AAD: перенос тега в другую категорию = перезапечатать имя.
     [[nodiscard]] domain::Result<domain::Bytes>
     sealTagName(domain::TagId id, domain::CategoryId category, std::string_view name) const;
+    [[nodiscard]] domain::Result<domain::Bytes>
+    sealTagNameEn(domain::TagId id, domain::CategoryId category, std::string_view nameEn) const;
     [[nodiscard]] domain::Result<domain::Tag> openTag(const domain::TagRecord& record) const;
 
     [[nodiscard]] domain::Result<domain::Bytes> sealChunk(domain::KeyPurpose purpose,

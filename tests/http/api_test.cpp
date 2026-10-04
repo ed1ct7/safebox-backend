@@ -647,10 +647,11 @@ TEST_CASE("GET /tags answers with the categories, their tags and the counts", "[
     HttpFixture f;
     auto r = f.api("GET", "/api/v1/tags");
     REQUIRE(r.status == 200);
-    CHECK(r.json() == http::Json::parse(R"({"categories":[{"id":1,"name":"Люди","tags":[)"
-                                        R"({"id":10,"categoryId":1,"name":"Ирис","count":2},)"
-                                        R"({"id":11,"categoryId":1,"name":"Рокси","count":0}]},)"
-                                        R"({"id":2,"name":"Язык","tags":[]}]})"));
+    CHECK(r.json() ==
+          http::Json::parse(R"({"categories":[{"id":1,"name":"Люди","nameEn":"","tags":[)"
+                            R"({"id":10,"categoryId":1,"name":"Ирис","nameEn":"","count":2},)"
+                            R"({"id":11,"categoryId":1,"name":"Рокси","nameEn":"","count":0}]},)"
+                            R"({"id":2,"name":"Язык","nameEn":"","tags":[]}]})"));
 
     f.fakes.tags->categories.clear();
     CHECK(f.api("GET", "/api/v1/tags").json() == http::Json({{"categories", http::Json::array()}}));
@@ -663,8 +664,9 @@ TEST_CASE("category endpoints: create, rename, remove", "[http][tags][UF-17]") {
     HttpFixture f;
     auto created = f.api("POST", "/api/v1/tags/categories", R"({"name":"Новая"})");
     REQUIRE(created.status == 201);
-    CHECK(created.json() ==
-          http::Json({{"id", 3}, {"name", "Новая"}, {"tags", http::Json::array()}}));
+    CHECK(
+        created.json() ==
+        http::Json({{"id", 3}, {"name", "Новая"}, {"nameEn", ""}, {"tags", http::Json::array()}}));
     CHECK(f.fakes.tags->lastName == "Новая");
 
     auto renamed = f.api("PATCH", "/api/v1/tags/categories/1", R"({"name":"Персонажи"})");
@@ -712,7 +714,8 @@ TEST_CASE("POST /tags creates a tag: 201, or 200 when it was there", "[http][tag
     HttpFixture f;
     auto created = f.api("POST", "/api/v1/tags", R"({"category":"Люди","name":"Ирис"})");
     REQUIRE(created.status == 201);
-    CHECK(created.json() == http::Json({{"id", 12}, {"categoryId", 1}, {"name", "Ирис"}}));
+    CHECK(created.json() ==
+          http::Json({{"id", 12}, {"categoryId", 1}, {"name", "Ирис"}, {"nameEn", ""}}));
     REQUIRE(f.fakes.tags->lastCreate.has_value());
     CHECK(f.fakes.tags->lastCreate->category == "Люди");
     CHECK(f.fakes.tags->lastCreate->name == "Ирис");
@@ -750,7 +753,8 @@ TEST_CASE("tag endpoints: update, merge, remove", "[http][tags][UF-17]") {
     HttpFixture f;
     auto renamed = f.api("PATCH", "/api/v1/tags/10", R"({"name":"Ирис Грейрат"})");
     REQUIRE(renamed.status == 200);
-    CHECK(renamed.json() == http::Json({{"id", 10}, {"categoryId", 1}, {"name", "Ирис Грейрат"}}));
+    CHECK(renamed.json() ==
+          http::Json({{"id", 10}, {"categoryId", 1}, {"name", "Ирис Грейрат"}, {"nameEn", ""}}));
     CHECK(f.fakes.tags->lastId == 10);
     CHECK(f.fakes.tags->lastUpdate->name == "Ирис Грейрат");
     CHECK_FALSE(f.fakes.tags->lastUpdate->categoryId.has_value());
@@ -1347,18 +1351,25 @@ TEST_CASE("GET and PATCH /settings need the Bearer token and speak the documente
     HttpFixture f;
     auto initial = f.api("GET", "/api/v1/settings");
     REQUIRE(initial.status == 200);
-    CHECK(initial.json() == http::Json({{"linkPreviews", true}}));
+    CHECK(initial.json() == http::Json({{"linkPreviews", true}, {"tagLanguage", "ru"}}));
 
     auto off = f.api("PATCH", "/api/v1/settings", R"({"linkPreviews":false})");
     REQUIRE(off.status == 200);
-    CHECK(off.json() == http::Json({{"linkPreviews", false}}));
+    CHECK(off.json() == http::Json({{"linkPreviews", false}, {"tagLanguage", "ru"}}));
     CHECK_FALSE(f.fakes.settings->settings.linkPreviews);
     CHECK(f.api("GET", "/api/v1/settings").json()["linkPreviews"] == false);
 
     // лишние поля не мешают; включить обратно
     auto on = f.api("PATCH", "/api/v1/settings", R"({"linkPreviews":true,"theme":"dark"})");
-    CHECK(on.json() == http::Json({{"linkPreviews", true}}));
+    CHECK(on.json() == http::Json({{"linkPreviews", true}, {"tagLanguage", "ru"}}));
     CHECK(f.fakes.settings->updates == 2);
+
+    // язык тегов: только он - linkPreviews не меняется; частичный апдейт
+    auto lang = f.api("PATCH", "/api/v1/settings", R"({"tagLanguage":"en"})");
+    REQUIRE(lang.status == 200);
+    CHECK(lang.json() == http::Json({{"linkPreviews", true}, {"tagLanguage", "en"}}));
+    CHECK(f.fakes.settings->settings.tagLanguage == domain::TagLanguage::En);
+    CHECK(f.fakes.settings->updates == 3);
 
     // как весь API: без Bearer (и только с cookie медиа) не пускает
     CHECK(f.request("GET", "/api/v1/settings").status == 401);
@@ -1379,8 +1390,9 @@ TEST_CASE("GET and PATCH /settings need the Bearer token and speak the documente
 TEST_CASE("PATCH /settings refuses a wrong body and reports a failed save",
           "[http][settings][UF-22]") {
     HttpFixture f;
-    for (const auto* body : {R"({})", R"({"linkPreviews":"yes"})", R"({"linkPreviews":0})",
-                             R"({"linkPreviews":null})", R"([])", R"({"linkPreviews":)"}) {
+    for (const auto* body :
+         {R"({})", R"({"linkPreviews":"yes"})", R"({"linkPreviews":0})", R"({"linkPreviews":null})",
+          R"([])", R"({"linkPreviews":)", R"({"tagLanguage":"de"})", R"({"tagLanguage":1})"}) {
         auto r = f.api("PATCH", "/api/v1/settings", body);
         CAPTURE(body);
         CHECK(r.status == 400);

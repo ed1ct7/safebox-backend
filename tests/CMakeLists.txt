@@ -17,7 +17,8 @@ target_include_directories(safebox-test-fakes INTERFACE "${CMAKE_CURRENT_SOURCE_
 target_link_libraries(safebox-test-fakes INTERFACE safebox-core)
 
 function(sbx_add_test_executable name)
-    add_executable(${name} ${ARGN})
+    # support/quiet_crash.cpp: без модальных окон CRT при падении теста
+    add_executable(${name} ${ARGN} "${CMAKE_CURRENT_SOURCE_DIR}/support/quiet_crash.cpp")
     sbx_apply_warnings(${name})
     sbx_apply_sanitizers(${name})
     add_test(NAME ${name} COMMAND ${name})

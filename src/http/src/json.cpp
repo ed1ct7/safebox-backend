@@ -231,7 +231,8 @@ Json toJson(const domain::SearchHit& hit) {
 }
 
 Json toJson(const domain::Tag& tag) {
-    return Json{{"id", tag.id}, {"categoryId", tag.categoryId}, {"name", tag.name}};
+    return Json{
+        {"id", tag.id}, {"categoryId", tag.categoryId}, {"name", tag.name}, {"nameEn", tag.nameEn}};
 }
 
 Json toJson(const app::CategoryWithTags& category) {
@@ -244,6 +245,7 @@ Json toJson(const app::CategoryWithTags& category) {
     return Json{
         {"id", category.category.id},
         {"name", category.category.name},
+        {"nameEn", category.category.nameEn},
         {"tags", std::move(tags)},
     };
 }
@@ -291,7 +293,8 @@ Json toJson(const app::CreateLinksResult& result) {
 }
 
 Json toJson(const domain::AppSettings& settings) {
-    return Json{{"linkPreviews", settings.linkPreviews}};
+    return Json{{"linkPreviews", settings.linkPreviews},
+                {"tagLanguage", domain::tagLanguageName(settings.tagLanguage)}};
 }
 
 } // namespace safebox::http

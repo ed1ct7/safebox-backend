@@ -57,6 +57,9 @@ public:
                 if (const auto value = parseBool(domain::detail::trim(text.substr(eq + 1)))) {
                     settings.linkPreviews = *value;
                 }
+            } else if (key == "tagLanguage") {
+                settings.tagLanguage =
+                    domain::tagLanguage(domain::detail::trim(text.substr(eq + 1)));
             }
         }
         return settings;
@@ -75,6 +78,7 @@ public:
         {
             std::ofstream out(temp, std::ios::binary | std::ios::trunc);
             out << "linkPreviews=" << (settings.linkPreviews ? 1 : 0) << '\n';
+            out << "tagLanguage=" << domain::tagLanguageName(settings.tagLanguage) << '\n';
             out.flush();
             if (!out) {
                 out.close();

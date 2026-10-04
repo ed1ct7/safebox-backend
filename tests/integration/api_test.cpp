@@ -624,6 +624,15 @@ TEST_CASE("tags over HTTP: create, assign, filter, manage, survive a reopen",
     CHECK(send("PATCH", "/api/v1/tags/" + annaId, {{"name", " аня "}}, 409)["error"]["code"] ==
           "already_exists");
     CHECK(send("PATCH", "/api/v1/tags/" + annaId, {{"name", "Анна К."}}, 200)["name"] == "Анна К.");
+    // второе имя (английское): тот же тег находится и по нему
+    CHECK(send("PATCH", "/api/v1/tags/" + annaId, {{"nameEn", "Anna K."}}, 200)["nameEn"] ==
+          "Anna K.");
+    CHECK(idOf(post(c, "/api/v1/tags", {{"category", "Люди"}, {"name", "ANNA K."}}, 200,
+                    bearer(token))) == idOf(anna));
+    CHECK(send("PATCH", "/api/v1/tags/" + std::to_string(idOf(aniya)), {{"nameEn", "anna k."}},
+               409)["error"]["code"] == "already_exists");
+    CHECK(send("PATCH", "/api/v1/tags/categories/" + std::to_string(peopleId),
+               {{"nameEn", "People"}}, 200)["nameEn"] == "People");
     const auto merged = post(c, "/api/v1/tags/" + std::to_string(idOf(aniya)) + "/merge",
                              {{"into", idOf(anna)}}, 200, bearer(token));
     CHECK(merged["affectedEntries"] == 1);
@@ -641,12 +650,15 @@ TEST_CASE("tags over HTTP: create, assign, filter, manage, survive a reopen",
         const auto all = get(c, "/api/v1/tags", token)["categories"];
         REQUIRE(all.size() == 2);
         CHECK(all[0]["name"] == "Люди");
+        CHECK(all[0]["nameEn"] == "People");
         REQUIRE(all[0]["tags"].size() == 1);
         CHECK(all[0]["tags"][0]["name"] == "Анна К.");
+        CHECK(all[0]["tags"][0]["nameEn"] == "Anna K.");
         CHECK(all[0]["tags"][0]["count"] == 3); // заметка, отчёт, readme
         CHECK(all[1]["name"] == "Места");
         REQUIRE(all[1]["tags"].size() == 1);
         CHECK(all[1]["tags"][0]["name"] == "Крым");
+        CHECK(all[1]["tags"][0]["nameEn"] == "");
         CHECK(all[1]["tags"][0]["count"] == 1);
     };
     checkCatalog();
@@ -874,7 +886,8 @@ TEST_CASE("links over HTTP: create, background preview, refresh, shortcut, zip a
         auto anonymous = c.Get("/api/v1/settings");
         REQUIRE(anonymous);
         CHECK(anonymous->status == 401);
-        CHECK(get(c, "/api/v1/settings", token) == Json({{"linkPreviews", true}}));
+        CHECK(get(c, "/api/v1/settings", token) ==
+              Json({{"linkPreviews", true}, {"tagLanguage", "ru"}}));
         CHECK_FALSE(std::filesystem::exists(settingsFile));
 
         // пачка: две новые ссылки, дубль (utm и регистр не в счет) и не-ссылка
@@ -973,8 +986,8 @@ TEST_CASE("links over HTTP: create, background preview, refresh, shortcut, zip a
                            "application/json");
         REQUIRE(off);
         REQUIRE(off->status == 200);
-        CHECK(Json::parse(off->body) == Json({{"linkPreviews", false}}));
-        CHECK(test::readFile(settingsFile) == "linkPreviews=0\n");
+        CHECK(Json::parse(off->body) == Json({{"linkPreviews", false}, {"tagLanguage", "ru"}}));
+        CHECK(test::readFile(settingsFile) == "linkPreviews=0\ntagLanguage=ru\n");
         const auto calls = stack.fetcher.calls.load();
         const auto quiet =
             post(c, "/api/v1/links", {{"links", {{{"url", "https://quiet.example/"}}}}}, 201,
@@ -995,7 +1008,8 @@ TEST_CASE("links over HTTP: create, background preview, refresh, shortcut, zip a
         const auto session =
             post(c, "/api/v1/safe/unlock", {{"path", safePath}, {"password", "пароль-1"}}, 200);
         const auto token = session["token"].get<std::string>();
-        CHECK(get(c, "/api/v1/settings", token) == Json({{"linkPreviews", false}}));
+        CHECK(get(c, "/api/v1/settings", token) ==
+              Json({{"linkPreviews", false}, {"tagLanguage", "ru"}}));
         const auto root = get(c, "/api/v1/entries", token);
         const auto link = byName(root, "Заголовок страницы");
         CHECK(link["url"] == "https://example.com/post");

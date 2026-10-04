@@ -57,53 +57,62 @@ void registerTagsApi(httplib::Server& server, ApiContext& ctx) {
         sendJson(res, Json{{"categories", std::move(items)}});
     });
 
-    server.Post("/api/v1/tags/categories",
-                [&ctx](const httplib::Request& req, httplib::Response& res) {
-                    auto lease = requireApi(ctx, req, res);
-                    if (!lease) {
-                        return;
-                    }
-                    auto body = readJsonObject(req, res);
-                    if (!body) {
-                        return;
-                    }
-                    const auto name = requireString(*body, "name", res);
-                    if (!name) {
-                        return;
-                    }
-                    auto category = ctx.services.tags->createCategory(*lease, *name);
-                    if (!category) {
-                        sendError(res, category.error());
-                        return;
-                    }
-                    sendJson(res, toJson(app::CategoryWithTags{*category, {}}), 201);
-                });
+    server.Post(
+        "/api/v1/tags/categories", [&ctx](const httplib::Request& req, httplib::Response& res) {
+            auto lease = requireApi(ctx, req, res);
+            if (!lease) {
+                return;
+            }
+            auto body = readJsonObject(req, res);
+            if (!body) {
+                return;
+            }
+            const auto name = requireString(*body, "name", res);
+            if (!name) {
+                return;
+            }
+            std::optional<std::string> nameEn;
+            if (!readOptionalString(*body, "nameEn", nameEn, res)) {
+                return;
+            }
+            auto category = ctx.services.tags->createCategory(*lease, *name, nameEn.value_or(""));
+            if (!category) {
+                sendError(res, category.error());
+                return;
+            }
+            sendJson(res, toJson(app::CategoryWithTags{*category, {}}), 201);
+        });
 
-    server.Patch("/api/v1/tags/categories/:id",
-                 [&ctx](const httplib::Request& req, httplib::Response& res) {
-                     auto lease = requireApi(ctx, req, res);
-                     if (!lease) {
-                         return;
-                     }
-                     const auto id = pathId(req, res, "категории");
-                     if (!id) {
-                         return;
-                     }
-                     auto body = readJsonObject(req, res);
-                     if (!body) {
-                         return;
-                     }
-                     const auto name = requireString(*body, "name", res);
-                     if (!name) {
-                         return;
-                     }
-                     auto category = ctx.services.tags->renameCategory(*lease, *id, *name);
-                     if (!category) {
-                         sendError(res, category.error());
-                         return;
-                     }
-                     sendJson(res, toJson(*category));
-                 });
+    server.Patch(
+        "/api/v1/tags/categories/:id", [&ctx](const httplib::Request& req, httplib::Response& res) {
+            auto lease = requireApi(ctx, req, res);
+            if (!lease) {
+                return;
+            }
+            const auto id = pathId(req, res, "категории");
+            if (!id) {
+                return;
+            }
+            auto body = readJsonObject(req, res);
+            if (!body) {
+                return;
+            }
+            app::RenameCategoryCmd cmd;
+            if (!readOptionalString(*body, "name", cmd.name, res) ||
+                !readOptionalString(*body, "nameEn", cmd.nameEn, res)) {
+                return;
+            }
+            if (!cmd.name && !cmd.nameEn) {
+                sendError(res, 400, "bad_request", "Укажите хотя бы одно поле: name или nameEn");
+                return;
+            }
+            auto category = ctx.services.tags->renameCategory(*lease, *id, cmd);
+            if (!category) {
+                sendError(res, category.error());
+                return;
+            }
+            sendJson(res, toJson(*category));
+        });
 
     server.Delete("/api/v1/tags/categories/:id",
                   [&ctx](const httplib::Request& req, httplib::Response& res) {
@@ -138,6 +147,13 @@ void registerTagsApi(httplib::Server& server, ApiContext& ctx) {
         if (!category || !name) {
             return;
         }
+        std::optional<std::string> nameEn;
+        if (!readOptionalString(*body, "nameEn", nameEn, res)) {
+            return;
+        }
+        if (nameEn) {
+            cmd.nameEn = std::move(*nameEn);
+        }
         if (const auto it = body->find("createCategory"); it != body->end()) {
             if (!it->is_boolean()) {
                 sendError(res, 400, "bad_request", "Поле 'createCategory' должно быть булевым");
@@ -170,11 +186,13 @@ void registerTagsApi(httplib::Server& server, ApiContext& ctx) {
         }
         app::UpdateTagCmd cmd;
         if (!readOptionalString(*body, "name", cmd.name, res) ||
+            !readOptionalString(*body, "nameEn", cmd.nameEn, res) ||
             !readOptionalId(*body, "categoryId", cmd.categoryId, res)) {
             return;
         }
-        if (!cmd.name && !cmd.categoryId) {
-            sendError(res, 400, "bad_request", "Укажите хотя бы одно поле: name или categoryId");
+        if (!cmd.name && !cmd.nameEn && !cmd.categoryId) {
+            sendError(res, 400, "bad_request",
+                      "Укажите хотя бы одно поле: name, nameEn или categoryId");
             return;
         }
         auto tag = ctx.services.tags->updateTag(*lease, *id, cmd);

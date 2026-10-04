@@ -195,7 +195,8 @@ TEST_CASE("category and tag names are sealed under their own ids", "[format][sea
 }
 
 TEST_CASE("AAD of v2 fields", "[format][seal]") {
-    CHECK(domain::kFormatVersion == 2);
+    CHECK(domain::kSealVersion == 2); // в AAD - версия раскладки шифра, не схемы
+    CHECK(domain::kFormatVersion == 3);
     const auto category = domain::aad::categoryName(0x0102030405060708);
     REQUIRE(category.size() == 13);
     CHECK(static_cast<int>(category[0]) == 2); // версия u32 little-endian
@@ -240,15 +241,15 @@ TEST_CASE("loadCatalog reads entries, categories and tags and checks their ids",
         auto& tags = (*uow)->tags();
         people = tags.insertCategory().value();
         places = tags.insertCategory().value();
-        REQUIRE(
-            tags.updateCategory(people, *f.sealer.sealCategoryName(people, "Люди")).has_value());
-        REQUIRE(
-            tags.updateCategory(places, *f.sealer.sealCategoryName(places, "Места")).has_value());
+        REQUIRE(tags.updateCategory(people, *f.sealer.sealCategoryName(people, "Люди"), {})
+                    .has_value());
+        REQUIRE(tags.updateCategory(places, *f.sealer.sealCategoryName(places, "Места"), {})
+                    .has_value());
         ivan = tags.insertTag(people).value();
         kazan = tags.insertTag(places).value();
-        REQUIRE(
-            tags.updateTag(ivan, people, *f.sealer.sealTagName(ivan, people, "Иван")).has_value());
-        REQUIRE(tags.updateTag(kazan, places, *f.sealer.sealTagName(kazan, places, "Казань"))
+        REQUIRE(tags.updateTag(ivan, people, *f.sealer.sealTagName(ivan, people, "Иван"), {})
+                    .has_value());
+        REQUIRE(tags.updateTag(kazan, places, *f.sealer.sealTagName(kazan, places, "Казань"), {})
                     .has_value());
         REQUIRE((*uow)->commit().has_value());
     }

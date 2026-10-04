@@ -19,7 +19,7 @@ using domain::KeyHandle;
 using domain::SafeMeta;
 
 [[nodiscard]] Status validateMeta(const SafeMeta& meta) {
-    if (meta.formatVersion != domain::kFormatVersion || meta.salt.size() != domain::kSaltSize ||
+    if (meta.formatVersion != domain::kSealVersion || meta.salt.size() != domain::kSaltSize ||
         meta.chunkSize < domain::kMinChunkSize || meta.chunkSize > domain::kMaxChunkSize ||
         meta.envelope.size() != domain::kSealOverhead + domain::kKeySize) {
         return fail(Error::Code::NotASafe, "Файл сейфа повреждён");
@@ -73,7 +73,7 @@ public:
         lockLocked();
 
         SafeMeta meta;
-        meta.formatVersion = domain::kFormatVersion;
+        meta.formatVersion = domain::kSealVersion;
         meta.kdf = config_.kdf;
         meta.salt = ports_.crypto.generateSalt();
         meta.chunkSize = config_.chunkSize;

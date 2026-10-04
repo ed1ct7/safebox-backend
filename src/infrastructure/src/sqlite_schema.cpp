@@ -17,6 +17,7 @@ using domain::Status;
 
 namespace {
 
+// Схема v2. Новый файл создается ею и затем проходит те же миграции, что и старый.
 constexpr std::string_view kSchemaV2 = R"sql(
 CREATE TABLE meta (
     id             INTEGER PRIMARY KEY CHECK (id = 1),
@@ -68,6 +69,16 @@ CREATE TABLE tags (
 CREATE INDEX tags_category ON tags(category_id);
 )sql";
 
+// v2 -> v3: вторая локализация имени у категорий и тегов, пустой блоб - не задана.
+// meta.format_version не трогаем - это версия шифрополей (kSealVersion), она в AAD конверта.
+constexpr std::string_view kMigrateV2ToV3 = R"sql(
+ALTER TABLE tag_categories ADD COLUMN enc_name_en BLOB NOT NULL DEFAULT x'';
+ALTER TABLE tags ADD COLUMN enc_name_en BLOB NOT NULL DEFAULT x'';
+)sql";
+
+// Сейфы этих схем умеем открывать (более старые - нет): текущая и предыдущая.
+constexpr std::int64_t kMinSupportedSchema = 2;
+
 [[nodiscard]] std::uint32_t readBe32(const std::array<unsigned char, 100>& h, std::size_t at) {
     return (std::uint32_t{h[at]} << 24) | (std::uint32_t{h[at + 1]} << 16) |
            (std::uint32_t{h[at + 2]} << 8) | std::uint32_t{h[at + 3]};
@@ -105,7 +116,7 @@ Status probeHeader(const std::filesystem::path& path) {
     if (version == 0) {
         return notASafe();
     }
-    if (version < domain::kFormatVersion) {
+    if (version < kMinSupportedSchema) {
         return oldFormat();
     }
     if (version > domain::kFormatVersion) {
@@ -145,6 +156,9 @@ Status createSchema(Database& db, const domain::SafeMeta& meta) {
         if (auto st = db.exec(kSchemaV2); !st) {
             return st;
         }
+        if (auto st = db.exec(kMigrateV2ToV3); !st) {
+            return st;
+        }
         auto insert = db.prepare(
             "INSERT INTO meta(id, format_version, kdf_ops, kdf_mem, salt, chunk_size, envelope)"
             " VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)");
@@ -160,8 +174,10 @@ Status createSchema(Database& db, const domain::SafeMeta& meta) {
         if (auto st = insert->run(); !st) {
             return st;
         }
+        // user_version - версия СХЕМЫ (миграции по ней); meta.format_version - версия
+        // шифрополей (kSealVersion, входит в AAD конверта) - их нельзя смешивать.
         return db.exec(fmt::format("PRAGMA application_id = {}; PRAGMA user_version = {};",
-                                   domain::kApplicationId, meta.formatVersion));
+                                   domain::kApplicationId, domain::kFormatVersion));
     };
     if (auto st = body(); !st) {
         (void)db.exec("ROLLBACK;");
@@ -182,7 +198,7 @@ Status verifyOpened(Database& db) {
     if (*appId != domain::kApplicationId || *version < 1) {
         return notASafe();
     }
-    if (*version < static_cast<std::int64_t>(domain::kFormatVersion)) {
+    if (*version < kMinSupportedSchema) {
         return oldFormat();
     }
     if (*version > static_cast<std::int64_t>(domain::kFormatVersion)) {
@@ -208,6 +224,34 @@ Status verifyOpened(Database& db) {
     }
 
     return {};
+}
+
+Status migrateIfNeeded(Database& db) {
+    auto version = db.pragmaInt("user_version");
+    if (!version) {
+        return std::unexpected(version.error());
+    }
+    if (*version == static_cast<std::int64_t>(domain::kFormatVersion)) {
+        return {};
+    }
+    if (*version != kMinSupportedSchema) {
+        return oldFormat();
+    }
+
+    if (auto st = db.exec("BEGIN IMMEDIATE;"); !st) {
+        return st;
+    }
+    auto body = [&]() -> Status {
+        if (auto st = db.exec(kMigrateV2ToV3); !st) {
+            return st;
+        }
+        return db.exec(fmt::format("PRAGMA user_version = {};", domain::kFormatVersion));
+    };
+    if (auto st = body(); !st) {
+        (void)db.exec("ROLLBACK;");
+        return st;
+    }
+    return db.exec("COMMIT;");
 }
 
 } // namespace safebox::infra::sqlite

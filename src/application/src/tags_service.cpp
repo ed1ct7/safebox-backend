@@ -42,7 +42,8 @@ Result<Snapshot> snapshotOf(const Lease& lease, domain::VaultStore& store) {
 
 const Catalog::CategoryNode* categoryNamed(const Catalog& cat, const std::string& folded) {
     for (const auto& [id, node] : cat.categories()) {
-        if (node.folded == folded) {
+        // дубликат - совпадение по любой из локализаций
+        if (node.folded == folded || (!node.foldedEn.empty() && node.foldedEn == folded)) {
             return &node;
         }
     }
@@ -53,7 +54,10 @@ const Catalog::CategoryNode* categoryNamed(const Catalog& cat, const std::string
 const Catalog::TagNode* tagNamed(const Catalog& cat, CategoryId category, const std::string& folded,
                                  TagId except = 0) {
     for (const auto& [id, node] : cat.tags()) {
-        if (node.tag.categoryId == category && node.folded == folded && id != except) {
+        if (node.tag.categoryId != category || id == except) {
+            continue;
+        }
+        if (node.folded == folded || (!node.foldedEn.empty() && node.foldedEn == folded)) {
             return &node;
         }
     }
@@ -168,8 +172,8 @@ auto stripping(const std::unordered_set<TagId>& gone) {
     };
 }
 
-Result<CategoryId> putCategory(domain::UnitOfWork& uow, const Sealer& sealer,
-                               std::string_view name) {
+Result<CategoryId> putCategory(domain::UnitOfWork& uow, const Sealer& sealer, std::string_view name,
+                               std::string_view nameEn) {
     auto id = uow.tags().insertCategory();
     if (!id) {
         return std::unexpected(id.error());
@@ -178,14 +182,18 @@ Result<CategoryId> putCategory(domain::UnitOfWork& uow, const Sealer& sealer,
     if (!encName) {
         return std::unexpected(encName.error());
     }
-    if (auto st = uow.tags().updateCategory(*id, *encName); !st) {
+    auto encNameEn = sealer.sealCategoryNameEn(*id, nameEn);
+    if (!encNameEn) {
+        return std::unexpected(encNameEn.error());
+    }
+    if (auto st = uow.tags().updateCategory(*id, *encName, *encNameEn); !st) {
         return std::unexpected(st.error());
     }
     return *id;
 }
 
 Result<TagId> putTag(domain::UnitOfWork& uow, const Sealer& sealer, CategoryId category,
-                     std::string_view name) {
+                     std::string_view name, std::string_view nameEn) {
     auto id = uow.tags().insertTag(category);
     if (!id) {
         return std::unexpected(id.error());
@@ -194,7 +202,11 @@ Result<TagId> putTag(domain::UnitOfWork& uow, const Sealer& sealer, CategoryId c
     if (!encName) {
         return std::unexpected(encName.error());
     }
-    if (auto st = uow.tags().updateTag(*id, category, *encName); !st) {
+    auto encNameEn = sealer.sealTagNameEn(*id, category, nameEn);
+    if (!encNameEn) {
+        return std::unexpected(encNameEn.error());
+    }
+    if (auto st = uow.tags().updateTag(*id, category, *encName, *encNameEn); !st) {
         return std::unexpected(st.error());
     }
     return *id;
@@ -228,10 +240,15 @@ public:
         return out;
     }
 
-    Result<domain::TagCategory> createCategory(const Lease& lease, std::string_view name) override {
+    Result<domain::TagCategory> createCategory(const Lease& lease, std::string_view name,
+                                               std::string_view nameEn) override {
         auto clean = domain::validateTagName(name);
         if (!clean) {
             return std::unexpected(clean.error());
+        }
+        auto cleanEn = domain::validateOptionalTagName(nameEn);
+        if (!cleanEn) {
+            return std::unexpected(cleanEn.error());
         }
         std::scoped_lock lock(mutex_);
         auto snap = snapshotOf(lease, ports_.store);
@@ -241,11 +258,15 @@ public:
         if (categoryNamed(*snap->catalog, foldForSearch(*clean)) != nullptr) {
             return fail(Error::Code::AlreadyExists, "Категория с таким названием уже есть");
         }
+        if (!cleanEn->empty() &&
+            categoryNamed(*snap->catalog, foldForSearch(*cleanEn)) != nullptr) {
+            return fail(Error::Code::AlreadyExists, "Категория с таким названием уже есть");
+        }
         auto uow = ports_.store.begin();
         if (!uow) {
             return std::unexpected(uow.error());
         }
-        auto id = putCategory(**uow, *snap->ctx.sealer, *clean);
+        auto id = putCategory(**uow, *snap->ctx.sealer, *clean, *cleanEn);
         if (!id) {
             return std::unexpected(id.error());
         }
@@ -253,14 +274,29 @@ public:
             return std::unexpected(st.error());
         }
         snap->ctx.session.invalidateCatalog();
-        return domain::TagCategory{*id, std::move(*clean)};
+        return domain::TagCategory{*id, std::move(*clean), std::move(*cleanEn)};
     }
 
     Result<CategoryWithTags> renameCategory(const Lease& lease, CategoryId id,
-                                            std::string_view name) override {
-        auto clean = domain::validateTagName(name);
-        if (!clean) {
-            return std::unexpected(clean.error());
+                                            const RenameCategoryCmd& cmd) override {
+        if (!cmd.name && !cmd.nameEn) {
+            return fail(Error::Code::InvalidArgument, "Не указано, что менять");
+        }
+        std::string name;
+        if (cmd.name) {
+            auto clean = domain::validateTagName(*cmd.name);
+            if (!clean) {
+                return std::unexpected(clean.error());
+            }
+            name = std::move(*clean);
+        }
+        std::string nameEn;
+        if (cmd.nameEn) {
+            auto clean = domain::validateOptionalTagName(*cmd.nameEn);
+            if (!clean) {
+                return std::unexpected(clean.error());
+            }
+            nameEn = std::move(*clean);
         }
         std::scoped_lock lock(mutex_);
         auto snap = snapshotOf(lease, ports_.store);
@@ -272,29 +308,47 @@ public:
         if (node == nullptr) {
             return fail(Error::Code::NotFound, "Категория не найдена");
         }
-        const auto folded = foldForSearch(*clean);
-        if (const auto* same = categoryNamed(cat, folded); same != nullptr && same != node) {
+        domain::TagCategory updated = node->category;
+        if (cmd.name) {
+            updated.name = std::move(name);
+        }
+        if (cmd.nameEn) {
+            updated.nameEn = std::move(nameEn);
+        }
+        if (updated == node->category) {
+            return describeCategory(cat, *node, directCounts(cat));
+        }
+        if (const auto* same = categoryNamed(cat, foldForSearch(updated.name));
+            same != nullptr && same != node) {
             return fail(Error::Code::AlreadyExists, "Категория с таким названием уже есть");
         }
-        auto out = describeCategory(cat, *node, directCounts(cat));
-        if (*clean != node->category.name) {
-            auto encName = snap->ctx.sealer->sealCategoryName(id, *clean);
-            if (!encName) {
-                return std::unexpected(encName.error());
+        if (!updated.nameEn.empty()) {
+            const auto* sameEn = categoryNamed(cat, foldForSearch(updated.nameEn));
+            if (sameEn != nullptr && sameEn != node) {
+                return fail(Error::Code::AlreadyExists, "Категория с таким названием уже есть");
             }
-            auto uow = ports_.store.begin();
-            if (!uow) {
-                return std::unexpected(uow.error());
-            }
-            if (auto st = (*uow)->tags().updateCategory(id, *encName); !st) {
-                return std::unexpected(st.error());
-            }
-            if (auto st = (*uow)->commit(); !st) {
-                return std::unexpected(st.error());
-            }
-            snap->ctx.session.invalidateCatalog();
         }
-        out.category.name = std::move(*clean);
+        auto out = describeCategory(cat, *node, directCounts(cat));
+        auto encName = snap->ctx.sealer->sealCategoryName(id, updated.name);
+        if (!encName) {
+            return std::unexpected(encName.error());
+        }
+        auto encNameEn = snap->ctx.sealer->sealCategoryNameEn(id, updated.nameEn);
+        if (!encNameEn) {
+            return std::unexpected(encNameEn.error());
+        }
+        auto uow = ports_.store.begin();
+        if (!uow) {
+            return std::unexpected(uow.error());
+        }
+        if (auto st = (*uow)->tags().updateCategory(id, *encName, *encNameEn); !st) {
+            return std::unexpected(st.error());
+        }
+        if (auto st = (*uow)->commit(); !st) {
+            return std::unexpected(st.error());
+        }
+        snap->ctx.session.invalidateCatalog();
+        out.category = std::move(updated);
         return out;
     }
 
@@ -347,6 +401,10 @@ public:
         if (!tagName) {
             return std::unexpected(tagName.error());
         }
+        auto tagNameEn = domain::validateOptionalTagName(cmd.nameEn);
+        if (!tagNameEn) {
+            return std::unexpected(tagNameEn.error());
+        }
         std::scoped_lock lock(mutex_);
         auto snap = snapshotOf(lease, ports_.store);
         if (!snap) {
@@ -357,6 +415,10 @@ public:
         if (category != nullptr) {
             if (const auto* found = tagNamed(cat, category->category.id, foldForSearch(*tagName))) {
                 return CreatedTag{found->tag, false};
+            }
+            if (!tagNameEn->empty() &&
+                tagNamed(cat, category->category.id, foldForSearch(*tagNameEn)) != nullptr) {
+                return fail(Error::Code::AlreadyExists, "Такой тег в этой категории уже есть");
             }
         } else if (!cmd.createCategory) {
             return fail(Error::Code::NotFound, "Категория не найдена");
@@ -371,13 +433,13 @@ public:
         if (category != nullptr) {
             categoryId = category->category.id;
         } else {
-            auto made = putCategory(**uow, sealer, *categoryName);
+            auto made = putCategory(**uow, sealer, *categoryName, {});
             if (!made) {
                 return std::unexpected(made.error());
             }
             categoryId = *made;
         }
-        auto tagId = putTag(**uow, sealer, categoryId, *tagName);
+        auto tagId = putTag(**uow, sealer, categoryId, *tagName, *tagNameEn);
         if (!tagId) {
             return std::unexpected(tagId.error());
         }
@@ -385,11 +447,12 @@ public:
             return std::unexpected(st.error());
         }
         snap->ctx.session.invalidateCatalog();
-        return CreatedTag{domain::Tag{*tagId, categoryId, std::move(*tagName)}, true};
+        return CreatedTag{
+            domain::Tag{*tagId, categoryId, std::move(*tagName), std::move(*tagNameEn)}, true};
     }
 
     Result<domain::Tag> updateTag(const Lease& lease, TagId id, const UpdateTagCmd& cmd) override {
-        if (!cmd.name && !cmd.categoryId) {
+        if (!cmd.name && !cmd.nameEn && !cmd.categoryId) {
             return fail(Error::Code::InvalidArgument, "Не указано, что менять");
         }
         std::string name;
@@ -399,6 +462,14 @@ public:
                 return std::unexpected(clean.error());
             }
             name = std::move(*clean);
+        }
+        std::string nameEn;
+        if (cmd.nameEn) {
+            auto clean = domain::validateOptionalTagName(*cmd.nameEn);
+            if (!clean) {
+                return std::unexpected(clean.error());
+            }
+            nameEn = std::move(*clean);
         }
         std::scoped_lock lock(mutex_);
         auto snap = snapshotOf(lease, ports_.store);
@@ -414,28 +485,39 @@ public:
         if (cmd.name) {
             updated.name = std::move(name);
         }
+        if (cmd.nameEn) {
+            updated.nameEn = std::move(nameEn);
+        }
         if (cmd.categoryId) {
             if (cat.findCategory(*cmd.categoryId) == nullptr) {
                 return fail(Error::Code::NotFound, "Категория не найдена");
             }
             updated.categoryId = *cmd.categoryId;
         }
-        if (updated.name == node->tag.name && updated.categoryId == node->tag.categoryId) {
+        if (updated == node->tag) {
             return updated;
         }
         if (tagNamed(cat, updated.categoryId, foldForSearch(updated.name), id) != nullptr) {
             return fail(Error::Code::AlreadyExists, "Такой тег в этой категории уже есть");
         }
-        // категория входит в AAD имени: при переносе имя запечатывается заново
+        if (!updated.nameEn.empty() &&
+            tagNamed(cat, updated.categoryId, foldForSearch(updated.nameEn), id) != nullptr) {
+            return fail(Error::Code::AlreadyExists, "Такой тег в этой категории уже есть");
+        }
+        // категория входит в AAD имен: при переносе оба имени запечатываются заново
         auto encName = snap->ctx.sealer->sealTagName(id, updated.categoryId, updated.name);
         if (!encName) {
             return std::unexpected(encName.error());
+        }
+        auto encNameEn = snap->ctx.sealer->sealTagNameEn(id, updated.categoryId, updated.nameEn);
+        if (!encNameEn) {
+            return std::unexpected(encNameEn.error());
         }
         auto uow = ports_.store.begin();
         if (!uow) {
             return std::unexpected(uow.error());
         }
-        if (auto st = (*uow)->tags().updateTag(id, updated.categoryId, *encName); !st) {
+        if (auto st = (*uow)->tags().updateTag(id, updated.categoryId, *encName, *encNameEn); !st) {
             return std::unexpected(st.error());
         }
         if (auto st = (*uow)->commit(); !st) {

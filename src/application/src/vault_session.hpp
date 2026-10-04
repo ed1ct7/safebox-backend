@@ -49,11 +49,13 @@ public:
     };
     struct CategoryNode {
         domain::TagCategory category;
-        std::string folded;
+        std::string folded;   // foldForSearch(name)
+        std::string foldedEn; // foldForSearch(nameEn); пуст, если второе имя не задано
     };
     struct TagNode {
         domain::Tag tag;
         std::string folded;
+        std::string foldedEn;
     };
 
     Catalog() = default;

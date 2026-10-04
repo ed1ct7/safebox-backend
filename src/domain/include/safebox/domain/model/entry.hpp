@@ -46,15 +46,22 @@ struct EntryMeta {
     std::vector<TagAssignment> tags; // прямые присвоения, по возрастанию tagId, без дублей
 };
 
+// Второе имя (nameEn) - английская локализация; пустая строка - не задано, показывается name.
 struct TagCategory {
     CategoryId id = 0;
     std::string name;
+    std::string nameEn;
+
+    friend bool operator==(const TagCategory&, const TagCategory&) = default;
 };
 
 struct Tag {
     TagId id = 0;
     CategoryId categoryId = 0;
     std::string name;
+    std::string nameEn;
+
+    friend bool operator==(const Tag&, const Tag&) = default;
 };
 
 // Тег, действующий на запись через предка с inherit.

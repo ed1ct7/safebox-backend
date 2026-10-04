@@ -121,7 +121,7 @@ struct AppFixture {
     // Тег в категории; недостающая категория создается.
     domain::TagId tag(const app::UnlockResult& session, const std::string& category,
                       const std::string& name) {
-        auto made = services.tags->createTag(lease(session), {category, name, true});
+        auto made = services.tags->createTag(lease(session), {.category = category, .name = name, .createCategory = true});
         REQUIRE(made.has_value());
         return made->tag.id;
     }

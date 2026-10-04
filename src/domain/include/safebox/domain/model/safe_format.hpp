@@ -5,6 +5,8 @@
 //   поле записи   = версия u32 | entry_id i64 | тег u8 (name=1, meta=2)
 //   имя категории = версия u32 | category_id i64 | 3
 //   имя тега      = версия u32 | tag_id i64 | 4 | category_id i64
+//   англ. имя кат.= версия u32 | category_id i64 | 5
+//   англ. имя тега = версия u32 | tag_id i64 | 6 | category_id i64
 #pragma once
 
 #include <array>
@@ -18,7 +20,11 @@
 
 namespace safebox::domain {
 
-inline constexpr std::uint32_t kFormatVersion = 2;
+// Версия раскладки AAD зашифрованных полей. Вошла в уже записанные шифртексты:
+// менять можно только вместе с полной переушифровкой сейфа.
+inline constexpr std::uint32_t kSealVersion = 2;
+// Версия схемы файла (PRAGMA user_version, колонки таблиц). Меняется миграцией при открытии.
+inline constexpr std::uint32_t kFormatVersion = 3;
 inline constexpr std::int32_t kApplicationId = 0x53424F58; // 'S' 'B' 'O' 'X'
 inline constexpr std::string_view kSafeExtension = ".safebox";
 
@@ -63,6 +69,8 @@ enum class FieldTag : std::uint8_t {
     Meta = 2,
     CategoryName = 3,
     TagName = 4,
+    CategoryNameEn = 5,
+    TagNameEn = 6,
 };
 
 namespace aad {
@@ -92,7 +100,7 @@ inline void putLe(Bytes& out, T value) {
 [[nodiscard]] inline Bytes chunk(BlobId blob, std::uint32_t index, bool last) {
     Bytes out;
     out.reserve(17);
-    detail::putLe(out, kFormatVersion);
+    detail::putLe(out, kSealVersion);
     detail::putLe(out, blob);
     detail::putLe(out, index);
     out.push_back(last ? std::byte{1} : std::byte{0});
@@ -102,7 +110,7 @@ inline void putLe(Bytes& out, T value) {
 [[nodiscard]] inline Bytes field(EntryId entry, FieldTag tag) {
     Bytes out;
     out.reserve(13);
-    detail::putLe(out, kFormatVersion);
+    detail::putLe(out, kSealVersion);
     detail::putLe(out, entry);
     out.push_back(static_cast<std::byte>(tag));
     return out;
@@ -112,18 +120,37 @@ inline void putLe(Bytes& out, T value) {
 [[nodiscard]] inline Bytes categoryName(CategoryId category) {
     Bytes out;
     out.reserve(13);
-    detail::putLe(out, kFormatVersion);
+    detail::putLe(out, kSealVersion);
     detail::putLe(out, category);
     out.push_back(static_cast<std::byte>(FieldTag::CategoryName));
+    return out;
+}
+
+[[nodiscard]] inline Bytes categoryNameEn(CategoryId category) {
+    Bytes out;
+    out.reserve(13);
+    detail::putLe(out, kSealVersion);
+    detail::putLe(out, category);
+    out.push_back(static_cast<std::byte>(FieldTag::CategoryNameEn));
     return out;
 }
 
 [[nodiscard]] inline Bytes tagName(TagId tag, CategoryId category) {
     Bytes out;
     out.reserve(21);
-    detail::putLe(out, kFormatVersion);
+    detail::putLe(out, kSealVersion);
     detail::putLe(out, tag);
     out.push_back(static_cast<std::byte>(FieldTag::TagName));
+    detail::putLe(out, category);
+    return out;
+}
+
+[[nodiscard]] inline Bytes tagNameEn(TagId tag, CategoryId category) {
+    Bytes out;
+    out.reserve(21);
+    detail::putLe(out, kSealVersion);
+    detail::putLe(out, tag);
+    out.push_back(static_cast<std::byte>(FieldTag::TagNameEn));
     detail::putLe(out, category);
     return out;
 }

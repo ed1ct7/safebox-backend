@@ -70,13 +70,13 @@ std::vector<domain::TagId> bulkTags(AppFixture& f, const app::UnlockResult& s, s
         REQUIRE(uow.has_value());
         auto& repo = (*uow)->tags();
         const auto category = repo.insertCategory().value();
-        REQUIRE(
-            repo.updateCategory(category, *sealer->sealCategoryName(category, "Все")).has_value());
+        REQUIRE(repo.updateCategory(category, *sealer->sealCategoryName(category, "Все"), {})
+                    .has_value());
         for (std::size_t i = 0; i < count; ++i) {
             const auto id = repo.insertTag(category).value();
             const auto name = "тег " + std::to_string(i);
-            REQUIRE(
-                repo.updateTag(id, category, *sealer->sealTagName(id, category, name)).has_value());
+            REQUIRE(repo.updateTag(id, category, *sealer->sealTagName(id, category, name), {})
+                        .has_value());
             ids.push_back(id);
         }
         REQUIRE((*uow)->commit().has_value());
@@ -139,7 +139,7 @@ TEST_CASE("categories are trimmed, unique without case and listed by folded name
         REQUIRE(f.importFiles(s, {{"a.txt", "a"}}).imported == 1);
         REQUIRE(f.tagEntries(s, {f.entryNamed(s, "a.txt").id}, {anna}) == 1);
 
-        auto renamed = tags.renameCategory(f.lease(s), people->id, " Персонажи ");
+        auto renamed = tags.renameCategory(f.lease(s), people->id, {.name = " Персонажи "});
         REQUIRE(renamed.has_value());
         CHECK(renamed->category.id == people->id);
         CHECK(renamed->category.name == "Персонажи");
@@ -147,21 +147,22 @@ TEST_CASE("categories are trimmed, unique without case and listed by folded name
         CHECK(renamed->tags[0].tag.name == "Анна");
         CHECK(renamed->tags[0].count == 1);
 
-        auto taken = tags.renameCategory(f.lease(s), people->id, "места");
+        auto taken = tags.renameCategory(f.lease(s), people->id, {.name = "места"});
         REQUIRE_FALSE(taken.has_value());
         CHECK(taken.error().code == Code::AlreadyExists);
-        auto recased =
-            tags.renameCategory(f.lease(s), people->id, "ПЕРСОНАЖИ"); // сама себе не дубль
+        auto recased = tags.renameCategory(f.lease(s), people->id,
+                                           {.name = "ПЕРСОНАЖИ"}); // сама себе не дубль
         REQUIRE(recased.has_value());
         CHECK(recased->category.name == "ПЕРСОНАЖИ");
-        auto same = tags.renameCategory(f.lease(s), places->id, "Места"); // ничего не меняется
+        auto same =
+            tags.renameCategory(f.lease(s), places->id, {.name = "Места"}); // ничего не меняется
         REQUIRE(same.has_value());
         CHECK(same->category.name == "Места");
 
-        auto bad = tags.renameCategory(f.lease(s), people->id, "a:b");
+        auto bad = tags.renameCategory(f.lease(s), people->id, {.name = "a:b"});
         REQUIRE_FALSE(bad.has_value());
         CHECK(bad.error().code == Code::InvalidArgument);
-        auto missing = tags.renameCategory(f.lease(s), 999, "Другая");
+        auto missing = tags.renameCategory(f.lease(s), 999, {.name = "Другая"});
         REQUIRE_FALSE(missing.has_value());
         CHECK(missing.error().code == Code::NotFound);
 
@@ -189,12 +190,13 @@ TEST_CASE("createTag finds an existing tag, creates a category only on request",
     auto s = f.createSafe();
     auto& tags = *f.services.tags;
 
-    auto noCategory = tags.createTag(f.lease(s), {"Персонажи", "Eris", false});
+    auto noCategory = tags.createTag(f.lease(s), {.category = "Персонажи", .name = "Eris"});
     REQUIRE_FALSE(noCategory.has_value());
     CHECK(noCategory.error().code == Code::NotFound);
     CHECK(listAll(f, s).empty()); // отказ ничего не создал
 
-    auto first = tags.createTag(f.lease(s), {" Персонажи ", " Eris Greyrat ", true});
+    auto first = tags.createTag(
+        f.lease(s), {.category = " Персонажи ", .name = " Eris Greyrat ", .createCategory = true});
     REQUIRE(first.has_value());
     CHECK(first->created);
     CHECK(first->tag.name == "Eris Greyrat");
@@ -204,10 +206,11 @@ TEST_CASE("createTag finds an existing tag, creates a category only on request",
     CHECK(first->tag.categoryId == all[0].category.id);
 
     // категория уже есть: createCategory не нужен; тот же тег без учета регистра - он же
-    auto other = tags.createTag(f.lease(s), {"персонажи", "Roxy", false});
+    auto other = tags.createTag(f.lease(s), {.category = "персонажи", .name = "Roxy"});
     REQUIRE(other.has_value());
     CHECK(other->created);
-    auto again = tags.createTag(f.lease(s), {"ПЕРСОНАЖИ", "ERIS GREYRAT", true});
+    auto again = tags.createTag(
+        f.lease(s), {.category = "ПЕРСОНАЖИ", .name = "ERIS GREYRAT", .createCategory = true});
     REQUIRE(again.has_value());
     CHECK_FALSE(again->created);
     CHECK(again->tag.id == first->tag.id);
@@ -215,7 +218,8 @@ TEST_CASE("createTag finds an existing tag, creates a category only on request",
     CHECK(listAll(f, s).size() == 1);
 
     // то же имя в другой категории - другой тег
-    auto elsewhere = tags.createTag(f.lease(s), {"Язык", "Roxy", true});
+    auto elsewhere =
+        tags.createTag(f.lease(s), {.category = "Язык", .name = "Roxy", .createCategory = true});
     REQUIRE(elsewhere.has_value());
     CHECK(elsewhere->created);
     CHECK(elsewhere->tag.id != other->tag.id);
@@ -228,7 +232,8 @@ TEST_CASE("createTag finds an existing tag, creates a category only on request",
                                                           {"Пер:сонажи", "Eris"},
                                                           {"Новая", "a:b"}}) {
         INFO(category << " / " << name.size());
-        auto refused = tags.createTag(f.lease(s), {category, name, true});
+        auto refused = tags.createTag(f.lease(s),
+                                      {.category = category, .name = name, .createCategory = true});
         REQUIRE_FALSE(refused.has_value());
         CHECK(refused.error().code == Code::InvalidArgument);
     }
@@ -297,6 +302,87 @@ TEST_CASE("updateTag renames and moves a tag, refusing duplicates", "[tags][UF-1
     REQUIRE(stored.size() == 2);
     CHECK(tagNames(stored[1]) == Names{"Eris", "Roxy", "Zed"});
     CHECK(stored[1].tags[1].tag.id == roxy);
+}
+
+TEST_CASE("nameEn is a second name of the same tag or category", "[tags][UF-17]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    auto& tags = *f.services.tags;
+
+    auto hinata = tags.createTag(f.lease(s), {.category = "Персонаж",
+                                              .name = "Хината",
+                                              .nameEn = " Hyuuga Hinata ",
+                                              .createCategory = true});
+    REQUIRE(hinata.has_value());
+    CHECK(hinata->created);
+    CHECK(hinata->tag.nameEn == "Hyuuga Hinata");
+
+    // тег, пришедший под английским именем (авторазметка), находит тот же тег
+    auto found = tags.createTag(f.lease(s), {.category = "персонаж", .name = "HYUUGA HINATA"});
+    REQUIRE(found.has_value());
+    CHECK_FALSE(found->created);
+    CHECK(found->tag.id == hinata->tag.id);
+    CHECK(found->tag.name == "Хината");
+
+    // второе имя не совпадает ни с одним именем соседа по категории
+    const auto sakura = f.tag(s, "Персонаж", "Сакура");
+    for (const auto* clash : {"хината", "hyuuga hinata"}) {
+        INFO(clash);
+        auto refused = tags.updateTag(f.lease(s), sakura, {.nameEn = clash});
+        REQUIRE_FALSE(refused.has_value());
+        CHECK(refused.error().code == Code::AlreadyExists);
+    }
+    auto renamedEn = tags.updateTag(f.lease(s), sakura, {.nameEn = "Haruno Sakura"});
+    REQUIRE(renamedEn.has_value());
+    CHECK(renamedEn->name == "Сакура");
+    CHECK(renamedEn->nameEn == "Haruno Sakura");
+    auto clashRu = tags.updateTag(f.lease(s), hinata->tag.id, {.name = "haruno sakura"});
+    REQUIRE_FALSE(clashRu.has_value());
+    CHECK(clashRu.error().code == Code::AlreadyExists);
+    auto badEn = tags.updateTag(f.lease(s), sakura, {.nameEn = "a:b"});
+    REQUIRE_FALSE(badEn.has_value());
+    CHECK(badEn.error().code == Code::InvalidArgument);
+
+    // перенос перезапечатывает оба имени; пробелы вместо имени - очистить
+    const auto archive = f.tag(s, "Архив", "Прочее");
+    auto all = listAll(f, s);
+    REQUIRE(categoryNames(all) == Names{"Архив", "Персонаж"});
+    auto moved = tags.updateTag(f.lease(s), hinata->tag.id, {.categoryId = all[0].category.id});
+    REQUIRE(moved.has_value());
+    CHECK(moved->nameEn == "Hyuuga Hinata");
+    auto cleared = tags.updateTag(f.lease(s), sakura, {.nameEn = "  "});
+    REQUIRE(cleared.has_value());
+    CHECK(cleared->nameEn.empty());
+
+    // категории: второе имя, дубли по любому из имен, очистка
+    auto people = tags.renameCategory(f.lease(s), all[1].category.id, {.nameEn = "Characters"});
+    REQUIRE(people.has_value());
+    CHECK(people->category.name == "Персонаж");
+    CHECK(people->category.nameEn == "Characters");
+    auto dupByEn = tags.createCategory(f.lease(s), "characters");
+    REQUIRE_FALSE(dupByEn.has_value());
+    CHECK(dupByEn.error().code == Code::AlreadyExists);
+    auto dupOfRu = tags.createCategory(f.lease(s), "Серии", "ПЕРСОНАЖ");
+    REQUIRE_FALSE(dupOfRu.has_value());
+    CHECK(dupOfRu.error().code == Code::AlreadyExists);
+    auto archiveEn = tags.renameCategory(f.lease(s), all[0].category.id, {.nameEn = "Archive"});
+    REQUIRE(archiveEn.has_value());
+    auto archiveCleared = tags.renameCategory(f.lease(s), all[0].category.id, {.nameEn = ""});
+    REQUIRE(archiveCleared.has_value());
+    CHECK(archiveCleared->category.nameEn.empty());
+    CHECK(archiveCleared->category.name == "Архив");
+
+    // все лежит в файле
+    auto reopened = reopen(f);
+    auto stored = listAll(f, reopened);
+    REQUIRE(stored.size() == 2);
+    CHECK(stored[0].category.nameEn.empty());
+    CHECK(stored[1].category.nameEn == "Characters");
+    REQUIRE(tagNames(stored[0]) == Names{"Прочее", "Хината"});
+    CHECK(stored[0].tags[0].tag.id == archive);
+    CHECK(stored[0].tags[1].tag.nameEn == "Hyuuga Hinata");
+    REQUIRE(tagNames(stored[1]) == Names{"Сакура"});
+    CHECK(stored[1].tags[0].tag.nameEn.empty());
 }
 
 TEST_CASE("assign adds, updates inherit and removes tags on several entries", "[tags][UF-16]") {
@@ -453,7 +539,7 @@ TEST_CASE("removeTag takes the tag off every entry, inherited or not", "[tags][U
     auto unused = tags.removeTag(f.lease(s), kept);
     REQUIRE(unused.has_value());
     CHECK(*unused == 1);
-    auto lonely = tags.createTag(f.lease(s), {"Люди", "Вера", false});
+    auto lonely = tags.createTag(f.lease(s), {.category = "Люди", .name = "Вера"});
     REQUIRE(lonely.has_value());
     auto none = tags.removeTag(f.lease(s), lonely->tag.id);
     REQUIRE(none.has_value());

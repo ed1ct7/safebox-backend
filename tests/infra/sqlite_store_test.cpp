@@ -2,6 +2,7 @@
 
 #include "safebox/domain/model/safe_format.hpp"
 #include "safebox/infra/factories.hpp"
+#include "sqlite_database.hpp"
 #include "store_contract.hpp"
 #include "temp_dir.hpp"
 
@@ -321,11 +322,11 @@ TEST_CASE("categories and tags persist; removing a category cascades on disk",
         auto& tags = (*uow)->tags();
         doomed = tags.insertCategory().value();
         kept = tags.insertCategory().value();
-        REQUIRE(tags.updateCategory(doomed, domain::toBytes("doomed")).has_value());
-        REQUIRE(tags.updateCategory(kept, domain::toBytes("kept")).has_value());
+        REQUIRE(tags.updateCategory(doomed, domain::toBytes("doomed"), {}).has_value());
+        REQUIRE(tags.updateCategory(kept, domain::toBytes("kept"), {}).has_value());
         for (const auto category : {doomed, kept, doomed}) {
             const auto id = tags.insertTag(category).value();
-            REQUIRE(tags.updateTag(id, category, domain::toBytes("tag-" + std::to_string(id)))
+            REQUIRE(tags.updateTag(id, category, domain::toBytes("tag-" + std::to_string(id)), {})
                         .has_value());
         }
         REQUIRE((*uow)->commit().has_value());
@@ -354,7 +355,7 @@ TEST_CASE("categories and tags persist; removing a category cascades on disk",
 }
 
 TEST_CASE("a file with user_version 1 is refused with a clear message", "[sqlite][format]") {
-    CHECK(domain::kFormatVersion == 2);
+    CHECK(domain::kFormatVersion == 3);
     TempDir dir;
     const auto path = dir / "old.safebox";
     {
@@ -363,7 +364,7 @@ TEST_CASE("a file with user_version 1 is refused with a clear message", "[sqlite
     }
     auto bytes = readFile(path);
     REQUIRE(bytes.size() >= 100);
-    REQUIRE(be32(bytes, 60) == 2);
+    REQUIRE(be32(bytes, 60) == 3);
 
     const auto withVersion = [&](char version) {
         auto patched = bytes;
@@ -386,7 +387,7 @@ TEST_CASE("a file with user_version 1 is refused with a clear message", "[sqlite
     CHECK(inspected.error().message == opened.error().message);
 
     // файл новее - другое сообщение, как и раньше
-    withVersion(3);
+    withVersion(4);
     auto newer = store->open(path);
     REQUIRE_FALSE(newer.has_value());
     CHECK(newer.error().code == Code::NotASafe);
@@ -395,6 +396,110 @@ TEST_CASE("a file with user_version 1 is refused with a clear message", "[sqlite
     withVersion(0);
     CHECK(store->open(path).error().message == "Файл не является сейфом SafeBox");
 
-    withVersion(2); // и без подмены файл открывается
+    withVersion(3); // и без подмены (текущая схема) файл открывается
     REQUIRE(store->open(path).has_value());
+}
+
+TEST_CASE("a v2 safe migrates to v3 on open: names intact, nameEn empty, then writable",
+          "[sqlite][format][migration]") {
+    TempDir dir;
+    const auto path = dir / "v2.safebox";
+    {
+        // Честный файл схемы v2: те же таблицы без enc_name_en.
+        auto db = infra::sqlite::Database::open(path, infra::sqlite::OpenMode::Create);
+        REQUIRE(db.has_value());
+        REQUIRE((*db)
+                    ->exec(R"sql(
+CREATE TABLE meta (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    format_version INTEGER NOT NULL,
+    kdf_ops        INTEGER NOT NULL,
+    kdf_mem        INTEGER NOT NULL,
+    salt           BLOB    NOT NULL,
+    chunk_size     INTEGER NOT NULL,
+    envelope       BLOB    NOT NULL
+) STRICT;
+CREATE TABLE blobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, status INTEGER NOT NULL DEFAULT 0 CHECK (status IN (0, 1)),
+    size INTEGER NOT NULL DEFAULT 0, chunk_count INTEGER NOT NULL DEFAULT 0
+) STRICT;
+CREATE TABLE chunks (
+    blob_id INTEGER NOT NULL REFERENCES blobs(id) ON DELETE CASCADE, idx INTEGER NOT NULL,
+    data BLOB NOT NULL, PRIMARY KEY (blob_id, idx)
+) STRICT;
+CREATE TABLE entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER REFERENCES entries(id) ON DELETE CASCADE,
+    is_folder INTEGER NOT NULL CHECK (is_folder IN (0, 1)), blob_id INTEGER REFERENCES blobs(id),
+    thumb_blob_id INTEGER REFERENCES blobs(id), enc_name BLOB NOT NULL, enc_meta BLOB NOT NULL
+) STRICT;
+CREATE TABLE tag_categories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, enc_name BLOB NOT NULL
+) STRICT;
+CREATE TABLE tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category_id INTEGER NOT NULL REFERENCES tag_categories(id) ON DELETE CASCADE,
+    enc_name BLOB NOT NULL
+) STRICT;
+INSERT INTO meta(id, format_version, kdf_ops, kdf_mem, salt, chunk_size, envelope)
+    VALUES (1, 2, 1, 8, x'07070707070707070707070707070707', 1048576, x'090909');
+)sql")
+                    .has_value());
+        REQUIRE(
+            (*db)
+                ->exec("INSERT INTO tag_categories(id, enc_name) VALUES (1, x'50656f706c65');"
+                       "INSERT INTO tags(id, category_id, enc_name) VALUES (10, 1, x'48696e61');"
+                       "PRAGMA application_id = 0x53424F58;"
+                       "PRAGMA user_version = 2;")
+                .has_value());
+    }
+
+    auto store = infra::makeSqliteVaultStore();
+    REQUIRE(store->open(path).has_value()); // миграция прошла незаметно для вызывающего
+    {
+        // UnitOfWork держит мьютекс хранилища: закрывать стор можно только после него
+        auto uow = store->begin();
+        auto categories = (*uow)->tags().categories();
+        REQUIRE(categories.has_value());
+        REQUIRE(categories->size() == 1);
+        CHECK((*categories)[0].encName == domain::toBytes("People"));
+        CHECK((*categories)[0].encNameEn.empty()); // вторая локализация появилась пустой
+        auto tags = (*uow)->tags().tags();
+        REQUIRE(tags.has_value());
+        REQUIRE(tags->size() == 1);
+        CHECK((*tags)[0].encName == domain::toBytes("Hina"));
+
+        // второе имя пишется и перечитывается после закрытия
+        REQUIRE((*uow)
+                    ->tags()
+                    .updateCategory((*categories)[0].id, (*categories)[0].encName,
+                                    domain::toBytes("People"))
+                    .has_value());
+        REQUIRE((*uow)
+                    ->tags()
+                    .updateTag((*tags)[0].id, (*tags)[0].categoryId, (*tags)[0].encName,
+                               domain::toBytes("Hina"))
+                    .has_value());
+        REQUIRE((*uow)->commit().has_value());
+    }
+    store->close();
+
+    {
+        // стор закрыл файл: теперь можно открыть его второй раз и посмотреть user_version
+        auto version = infra::sqlite::Database::open(path, infra::sqlite::OpenMode::ReadOnly);
+        REQUIRE(version.has_value());
+        auto userVersion = (*version)->pragmaInt("user_version");
+        REQUIRE(userVersion.has_value());
+        CHECK(*userVersion == domain::kFormatVersion);
+    }
+
+    REQUIRE(store->open(path).has_value());
+    auto uow2 = store->begin();
+    auto again = (*uow2)->tags().categories();
+    REQUIRE(again.has_value());
+    REQUIRE(again->size() == 1);
+    CHECK((*again)[0].encNameEn == domain::toBytes("People"));
+    auto tagsAgain = (*uow2)->tags().tags();
+    REQUIRE(tagsAgain.has_value());
+    REQUIRE(tagsAgain->size() == 1);
+    CHECK((*tagsAgain)[0].encNameEn == domain::toBytes("Hina"));
 }
