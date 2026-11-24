@@ -3,8 +3,11 @@
 // close(): в EXCLUSIVE режиме sqlite не удаляет -journal, а только обнуляет, так что удаляем сами
 #include "sqlite_vault_store.hpp"
 
+#include <sqlite3.h>
+
 #include <array>
 #include <fstream>
+#include <optional>
 #include <system_error>
 
 #include "safebox/domain/model/safe_format.hpp"
@@ -597,6 +600,137 @@ void removeStaleJournal(const std::filesystem::path& path) noexcept {
     return meta;
 }
 
+// Копия: страниц за шаг. 256 * 64 КиБ = 16 МиБ - мьютекс соединения держится десятки мс.
+constexpr int kCopyPagesPerStep = 256;
+
+[[nodiscard]] std::filesystem::path partOf(const std::filesystem::path& target) {
+    auto part = target;
+    part += ".part";
+    return part;
+}
+
+void removeCopyFiles(const std::filesystem::path& part) noexcept {
+    std::error_code ec;
+    std::filesystem::remove(part, ec);
+    std::filesystem::remove(journalOf(part), ec);
+}
+
+// Под conn.mutex: копия больше не связана с исходным соединением, файл копии закрыт.
+void abortCopy(CopyState& state) noexcept {
+    if (state.backup != nullptr) {
+        sqlite3_backup_finish(state.backup);
+        state.backup = nullptr;
+    }
+    state.dest.reset();
+}
+
+// sqlite3_backup_* поверх исходного соединения: шаги - под его мьютексом, между шагами идут
+// обычные запросы; правки того же соединения SQLite сам переносит в копию.
+class SqliteVaultCopy final : public domain::VaultCopy {
+public:
+    SqliteVaultCopy(Connection& conn, std::filesystem::path target, std::uint64_t pageSize,
+                    std::uint64_t pages) noexcept
+        : conn_(conn), target_(std::move(target)), part_(partOf(target_)), pageSize_(pageSize),
+          pages_(pages), left_(pages) {}
+
+    SqliteVaultCopy(const SqliteVaultCopy&) = delete;
+    SqliteVaultCopy& operator=(const SqliteVaultCopy&) = delete;
+
+    ~SqliteVaultCopy() override {
+        {
+            std::scoped_lock lock(conn_.mutex);
+            if (conn_.copy == &state_) {
+                conn_.copy = nullptr;
+            }
+            abortCopy(state_); // close() мог уже оборвать - тогда тут пусто
+        }
+        if (!done_) {
+            removeCopyFiles(part_);
+        }
+    }
+
+    // Под conn.mutex, до первого step.
+    void attach(std::unique_ptr<Database> dest, sqlite3_backup* backup) noexcept {
+        state_.dest = std::move(dest);
+        state_.backup = backup;
+        conn_.copy = &state_;
+    }
+
+    Result<bool> step() override {
+        if (done_) {
+            return true;
+        }
+        auto lock = lockOpen(conn_);
+        if (!lock) {
+            return std::unexpected(lock.error());
+        }
+        if (conn_.copy != &state_ || state_.backup == nullptr) {
+            return fail(Error::Code::Locked, "Копия прервана: сейф закрывался");
+        }
+        const int rc = sqlite3_backup_step(state_.backup, kCopyPagesPerStep);
+        pages_ = static_cast<std::uint64_t>(sqlite3_backup_pagecount(state_.backup));
+        left_ = static_cast<std::uint64_t>(sqlite3_backup_remaining(state_.backup));
+        const int primary = rc & 0xFF; // открыто с расширенными кодами
+        if (primary == SQLITE_OK || primary == SQLITE_BUSY || primary == SQLITE_LOCKED) {
+            return false;
+        }
+        std::optional<Error> error;
+        if (primary != SQLITE_DONE) {
+            error = sqliteError(rc, "копия сейфа", state_.dest->handle());
+        }
+        const int finished = sqlite3_backup_finish(state_.backup);
+        state_.backup = nullptr;
+        conn_.copy = nullptr;
+        if (!error && finished != SQLITE_OK) {
+            error = sqliteError(finished, "копия сейфа", state_.dest->handle());
+        }
+        state_.dest.reset(); // при успехе транзакция копии уже зафиксирована (synchronous = FULL)
+        if (error) {
+            return std::unexpected(std::move(*error));
+        }
+        lock->unlock();
+        return complete();
+    }
+
+    std::uint64_t bytesDone() const noexcept override { return (pages_ - left_) * pageSize_; }
+    std::uint64_t bytesTotal() const noexcept override { return pages_ * pageSize_; }
+
+private:
+    // Копия читается как сейф и только потом получает свое имя.
+    Result<bool> complete() {
+        {
+            auto db = Database::open(part_, OpenMode::ReadOnly);
+            if (!db) {
+                return std::unexpected(db.error());
+            }
+            if (auto st = verifyOpened(**db); !st) {
+                return fail(Error::Code::IntegrityError,
+                            "Копия сейфа не читается: " + st.error().message);
+            }
+        }
+        std::error_code ec;
+        if (std::filesystem::exists(target_, ec)) {
+            return fail(Error::Code::AlreadyExists, "Файл уже существует");
+        }
+        std::filesystem::rename(part_, target_, ec);
+        if (ec) {
+            return fail(Error::Code::IoError,
+                        "Не удалось переименовать копию сейфа: " + domain::pathToUtf8(target_));
+        }
+        done_ = true;
+        return true;
+    }
+
+    Connection& conn_;
+    CopyState state_;
+    std::filesystem::path target_;
+    std::filesystem::path part_;
+    std::uint64_t pageSize_ = 0;
+    std::uint64_t pages_ = 0;
+    std::uint64_t left_ = 0;
+    bool done_ = false;
+};
+
 } // namespace
 
 Status SqliteVaultStore::create(const std::filesystem::path& path, const domain::SafeMeta& meta) {
@@ -693,6 +827,10 @@ void SqliteVaultStore::close() noexcept {
     }
     conn_.open.store(false);
     conn_.schemaCurrent = false;
+    if (conn_.copy != nullptr) { // копия не переживает закрытие: ее .part удалит владелец
+        abortCopy(*conn_.copy);
+        conn_.copy = nullptr;
+    }
     conn_.db.reset();
     removeStaleJournal(conn_.path);
     conn_.path.clear();
@@ -728,6 +866,63 @@ Status SqliteVaultStore::compact() {
         return std::unexpected(lock.error());
     }
     return conn_.db->exec("PRAGMA incremental_vacuum;");
+}
+
+Result<std::unique_ptr<domain::VaultCopy>>
+SqliteVaultStore::backup(const std::filesystem::path& target) {
+    auto lock = lockOpen(conn_);
+    if (!lock) {
+        return std::unexpected(lock.error());
+    }
+    if (conn_.copy != nullptr) {
+        return fail(Error::Code::AlreadyExists, "Копия сейфа уже делается");
+    }
+    std::error_code ec;
+    if (std::filesystem::exists(target, ec)) {
+        return fail(Error::Code::AlreadyExists, "Файл уже существует");
+    }
+    const auto parent = target.parent_path();
+    if (parent.empty() || !std::filesystem::is_directory(parent, ec)) {
+        return fail(Error::Code::InvalidArgument,
+                    "Папка не найдена: " + domain::pathToUtf8(parent));
+    }
+    auto pageSize = conn_.db->pragmaInt("page_size");
+    if (!pageSize) {
+        return std::unexpected(pageSize.error());
+    }
+    auto pages = conn_.db->pragmaInt("page_count");
+    if (!pages) {
+        return std::unexpected(pages.error());
+    }
+    const auto part = partOf(target);
+    removeCopyFiles(part); // остаток оборванной копии (имя .part - наше)
+    if (std::filesystem::exists(part, ec)) {
+        return fail(Error::Code::IoError,
+                    "Не удалось удалить незаконченную копию: " + domain::pathToUtf8(part));
+    }
+    auto dest = Database::open(part, OpenMode::Create);
+    if (!dest) {
+        removeCopyFiles(part);
+        return fail(Error::Code::IoError, "Не удалось создать файл копии: " + dest.error().message);
+    }
+    if (auto st = (*dest)->exec("PRAGMA synchronous = FULL; PRAGMA journal_mode = DELETE;"); !st) {
+        dest->reset();
+        removeCopyFiles(part);
+        return std::unexpected(st.error());
+    }
+    auto* handle = sqlite3_backup_init((*dest)->handle(), "main", conn_.db->handle(), "main");
+    if (handle == nullptr) {
+        auto error = sqliteError(sqlite3_extended_errcode((*dest)->handle()), "копия сейфа",
+                                 (*dest)->handle());
+        dest->reset();
+        removeCopyFiles(part);
+        return std::unexpected(std::move(error));
+    }
+    auto copy = std::make_unique<SqliteVaultCopy>(
+        conn_, target, static_cast<std::uint64_t>(*pageSize), static_cast<std::uint64_t>(*pages));
+    copy->attach(std::move(*dest), handle);
+    lock->unlock(); // деструктор копии берет тот же мьютекс
+    return std::unique_ptr<domain::VaultCopy>(std::move(copy));
 }
 
 } // namespace safebox::infra::sqlite

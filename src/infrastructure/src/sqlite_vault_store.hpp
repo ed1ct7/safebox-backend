@@ -10,7 +10,16 @@
 #include "safebox/domain/ports/storage.hpp"
 #include "sqlite_database.hpp"
 
+struct sqlite3_backup;
+
 namespace safebox::infra::sqlite {
+
+// Идущая копия сейфа (VaultStore::backup); живет в SqliteVaultCopy, Connection знает о ней,
+// чтобы close() оборвал копию до закрытия исходного соединения.
+struct CopyState {
+    std::unique_ptr<Database> dest; // соединение с "<target>.part"
+    sqlite3_backup* backup = nullptr;
+};
 
 struct Connection {
     std::mutex mutex;
@@ -21,6 +30,7 @@ struct Connection {
     // отказывает - записи старой схемы читаются и пишутся только после upgrade().
     bool schemaCurrent = false;
     std::atomic<std::thread::id> uowOwner{};
+    CopyState* copy = nullptr; // под mutex: идущая копия или nullptr
 };
 
 [[nodiscard]] domain::Result<std::unique_lock<std::mutex>> lockOpen(Connection& conn);
@@ -55,6 +65,8 @@ public:
     domain::Result<std::unique_ptr<domain::UnitOfWork>> begin() override;
     domain::BlobStore& blobs() override { return blobs_; }
     domain::Status compact() override;
+    domain::Result<std::unique_ptr<domain::VaultCopy>>
+    backup(const std::filesystem::path& target) override;
 
 private:
     Connection conn_;

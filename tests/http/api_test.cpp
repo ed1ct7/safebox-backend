@@ -381,12 +381,43 @@ TEST_CASE("safe lifecycle endpoints", "[http][safe]") {
     CHECK(authed.json()["safe"]["entryCount"] == 3);
     CHECK(authed.json()["hashes"] == http::Json{{"pending", 12}, {"failed", 1}});
     CHECK_FALSE(status.json().contains("hashes")); // без токена - нет
+    CHECK_FALSE(authed.json().contains("backup")); // копий в этом открытии не было
 
     auto lock = f.api("POST", "/api/v1/safe/lock");
     CHECK(lock.status == 204);
     CHECK(f.fakes.safe->lockCalls == 1);
     CHECK(lock.header("set-cookie").find("Max-Age=0") != std::string::npos);
     CHECK(f.api("POST", "/api/v1/safe/lock").status == 401);
+}
+
+TEST_CASE("backup starts in the background and shows up in the status", "[http][backup]") {
+    HttpFixture f;
+    auto started = f.api("POST", "/api/v1/safe/backup", R"({"path":"D:/backup/копия"})");
+    REQUIRE(started.status == 202);
+    CHECK(f.fakes.backup->lastPath == "D:/backup/копия");
+    CHECK(started.json()["state"] == "running");
+    CHECK(started.json()["path"] == "D:/backup/копия");
+    CHECK(started.json()["bytesDone"] == 0);
+    CHECK(started.json()["bytesTotal"] == 4096);
+    CHECK_FALSE(started.json().contains("error"));
+
+    f.fakes.backup->value.state = app::BackupState::Failed;
+    f.fakes.backup->value.error = "Нет места на диске";
+    auto status = f.api("GET", "/api/v1/safe/status");
+    CHECK(status.json()["backup"]["state"] == "failed");
+    CHECK(status.json()["backup"]["error"] == "Нет места на диске");
+    f.fakes.backup->value.state = app::BackupState::Done;
+    CHECK(f.api("GET", "/api/v1/safe/status").json()["backup"]["state"] == "done");
+    CHECK_FALSE(f.request("GET", "/api/v1/safe/status").json().contains("backup"));
+
+    f.fakes.backup->error = domain::Error{Code::AlreadyExists, "Файл уже существует"};
+    auto taken = f.api("POST", "/api/v1/safe/backup", R"({"path":"x"})");
+    CHECK(taken.status == 409);
+    CHECK(f.api("POST", "/api/v1/safe/backup", R"({"path":5})").status == 400);
+    CHECK(f.api("POST", "/api/v1/safe/backup", "{}").status == 400);
+    CHECK(f.request("POST", "/api/v1/safe/backup", {"Content-Type: application/json"},
+                    R"({"path":"x"})")
+              .status == 401);
 }
 
 TEST_CASE("entries endpoints speak the documented DTO", "[http][entries]") {

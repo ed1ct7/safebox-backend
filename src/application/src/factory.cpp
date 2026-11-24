@@ -8,7 +8,7 @@ Services makeServices(Ports ports, AppConfig config) {
     Services services;
     auto hashes = makeContentHashService(ports);
     services.safe = makeSafeService(
-        ports, std::move(config),
+        ports, config,
         [weak = std::weak_ptr<ContentHashRunner>(hashes)](std::weak_ptr<VaultSession> session) {
             if (auto runner = weak.lock()) {
                 runner->start(std::move(session));
@@ -20,6 +20,7 @@ Services makeServices(Ports ports, AppConfig config) {
     services.tags = makeTagsService(ports);
     services.settings = makeSettingsService(ports);
     services.links = makeLinksService(ports, services.settings);
+    services.backup = makeBackupService(ports, config);
     services.hashes = std::move(hashes);
     return services;
 }

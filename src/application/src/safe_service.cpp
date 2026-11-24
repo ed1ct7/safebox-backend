@@ -320,25 +320,7 @@ private:
     }
 
     [[nodiscard]] Result<std::filesystem::path> resolvePath(std::string_view raw) const {
-        const auto text = domain::detail::trim(raw);
-        if (text.empty()) {
-            return fail(Error::Code::InvalidArgument, "Укажите путь к файлу сейфа");
-        }
-        if (!domain::isValidUtf8(text) || text.find('\0') != std::string_view::npos) {
-            return fail(Error::Code::InvalidArgument, "Некорректный путь к файлу сейфа");
-        }
-        auto path = domain::pathFromUtf8(text);
-        if (path.is_relative()) {
-            if (config_.defaultDirectory.empty()) {
-                return fail(Error::Code::InvalidArgument, "Укажите полный путь к файлу сейфа");
-            }
-            path = config_.defaultDirectory / path;
-        }
-        path = path.lexically_normal();
-        if (!path.has_filename()) {
-            return fail(Error::Code::InvalidArgument, "Укажите имя файла сейфа");
-        }
-        return path;
+        return resolveSafePath(raw, config_.defaultDirectory);
     }
 
     [[nodiscard]] Result<KeyHandle> unwrapMaster(std::string_view password, const SafeMeta& meta) {
@@ -457,6 +439,29 @@ private:
 };
 
 } // namespace
+
+Result<std::filesystem::path> resolveSafePath(std::string_view raw,
+                                              const std::filesystem::path& defaultDirectory) {
+    const auto text = domain::detail::trim(raw);
+    if (text.empty()) {
+        return fail(Error::Code::InvalidArgument, "Укажите путь к файлу сейфа");
+    }
+    if (!domain::isValidUtf8(text) || text.find('\0') != std::string_view::npos) {
+        return fail(Error::Code::InvalidArgument, "Некорректный путь к файлу сейфа");
+    }
+    auto path = domain::pathFromUtf8(text);
+    if (path.is_relative()) {
+        if (defaultDirectory.empty()) {
+            return fail(Error::Code::InvalidArgument, "Укажите полный путь к файлу сейфа");
+        }
+        path = defaultDirectory / path;
+    }
+    path = path.lexically_normal();
+    if (!path.has_filename()) {
+        return fail(Error::Code::InvalidArgument, "Укажите имя файла сейфа");
+    }
+    return path;
+}
 
 std::shared_ptr<SafeService> makeSafeService(Ports ports, AppConfig config,
                                              SessionStarted onStarted) {

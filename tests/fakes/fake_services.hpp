@@ -483,6 +483,27 @@ public:
     app::HashProgress value{.pending = 12, .failed = 1};
 };
 
+class FakeBackupService final : public app::BackupService {
+public:
+    app::Result<app::BackupProgress> start(const app::Lease&, std::string_view path) override {
+        lastPath = std::string(path);
+        if (error) {
+            return std::unexpected(*error);
+        }
+        value = {.state = app::BackupState::Running,
+                 .path = domain::pathFromUtf8(lastPath),
+                 .bytesDone = 0,
+                 .bytesTotal = 4096};
+        return value;
+    }
+    app::BackupProgress progress(const app::Lease&) const override { return value; }
+    void drain() override {}
+
+    std::string lastPath;
+    std::optional<domain::Error> error;
+    app::BackupProgress value;
+};
+
 struct FakeServices {
     std::shared_ptr<FakeSafeService> safe = std::make_shared<FakeSafeService>();
     std::shared_ptr<FakeEntriesService> entries = std::make_shared<FakeEntriesService>();
@@ -492,10 +513,11 @@ struct FakeServices {
     std::shared_ptr<FakeTagsService> tags = std::make_shared<FakeTagsService>();
     std::shared_ptr<FakeLinksService> links = std::make_shared<FakeLinksService>();
     std::shared_ptr<FakeSettingsService> settings = std::make_shared<FakeSettingsService>();
+    std::shared_ptr<FakeBackupService> backup = std::make_shared<FakeBackupService>();
     std::shared_ptr<FakeContentHashService> hashes = std::make_shared<FakeContentHashService>();
 
     [[nodiscard]] app::Services services() const {
-        return {safe, entries, importExport, search, tags, links, settings, hashes};
+        return {safe, entries, importExport, search, tags, links, settings, backup, hashes};
     }
 };
 

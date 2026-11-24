@@ -246,6 +246,33 @@ Json toJson(const app::FolderListing& listing) {
     };
 }
 
+Json toJson(const app::BackupProgress& progress) {
+    const char* state = "none";
+    switch (progress.state) {
+    case app::BackupState::None:
+        break;
+    case app::BackupState::Running:
+        state = "running";
+        break;
+    case app::BackupState::Done:
+        state = "done";
+        break;
+    case app::BackupState::Failed:
+        state = "failed";
+        break;
+    }
+    Json body{
+        {"state", state},
+        {"path", domain::pathToUtf8(progress.path)},
+        {"bytesDone", progress.bytesDone},
+        {"bytesTotal", progress.bytesTotal},
+    };
+    if (progress.state == app::BackupState::Failed) {
+        body["error"] = progress.error;
+    }
+    return body;
+}
+
 Json toJson(const app::FolderNode& node) {
     return Json{
         {"id", node.id},

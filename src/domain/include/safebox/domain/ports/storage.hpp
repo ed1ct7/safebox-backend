@@ -168,6 +168,19 @@ public:
     [[nodiscard]] virtual Result<std::size_t> gcPending() = 0;
 };
 
+// Копия открытого сейфа: файл копируется постранично как есть (содержимое остается
+// зашифрованным тем же ключом, пароль тот же). Пишется в "<target>.part"; готовая копия
+// переименовывается в target. Правки сейфа между шагами попадают в копию.
+class VaultCopy {
+public:
+    virtual ~VaultCopy() = default; // не дошла до конца (или ошибка) -> .part удаляется
+
+    // Следующая порция страниц; true - копия готова и лежит в target. Сейф закрыт -> Locked.
+    [[nodiscard]] virtual Result<bool> step() = 0;
+    [[nodiscard]] virtual std::uint64_t bytesDone() const noexcept = 0;
+    [[nodiscard]] virtual std::uint64_t bytesTotal() const noexcept = 0;
+};
+
 class VaultStore {
 public:
     virtual ~VaultStore() = default;
@@ -191,6 +204,10 @@ public:
     [[nodiscard]] virtual Result<std::unique_ptr<UnitOfWork>> begin() = 0;
     [[nodiscard]] virtual BlobStore& blobs() = 0;
     [[nodiscard]] virtual Status compact() = 0;
+    // Начать копию открытого сейфа. target уже есть -> AlreadyExists, нет папки ->
+    // InvalidArgument; одна копия за раз (вторая -> AlreadyExists). Закрытие сейфа обрывает копию.
+    [[nodiscard]] virtual Result<std::unique_ptr<VaultCopy>>
+    backup(const std::filesystem::path& target) = 0;
 };
 
 } // namespace safebox::domain

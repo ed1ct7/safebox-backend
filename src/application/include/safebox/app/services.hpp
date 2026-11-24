@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <span>
@@ -427,6 +428,37 @@ public:
     virtual void drain() = 0; // дождаться, пока очередь опустеет (тесты)
 };
 
+// Копия открытого сейфа в другой файл: постранично, содержимое не расшифровывается, пароль у
+// копии тот же. Идет в фоне шагами (16 МиБ), запросы между шагами не ждут; правки во время
+// копии в нее попадают. Блокировка обрывает копию, незаконченный файл удаляется.
+enum class BackupState {
+    None, // в этом открытии копий не было
+    Running,
+    Done,
+    Failed,
+};
+
+struct BackupProgress {
+    BackupState state = BackupState::None;
+    std::filesystem::path path; // куда
+    std::uint64_t bytesDone = 0;
+    std::uint64_t bytesTotal = 0;
+    std::string error; // Failed: причина
+};
+
+class BackupService {
+public:
+    virtual ~BackupService() = default;
+
+    // path - как у create: относительный - от папки по умолчанию, ".safebox" дописывается.
+    // Файл уже есть или копия уже идет -> AlreadyExists, нет папки -> InvalidArgument.
+    [[nodiscard]] virtual Result<BackupProgress> start(const Lease& lease,
+                                                       std::string_view path) = 0;
+    // Последняя копия этого открытия сейфа.
+    [[nodiscard]] virtual BackupProgress progress(const Lease& lease) const = 0;
+    virtual void drain() = 0; // дождаться конца идущей копии (тесты)
+};
+
 class LinksService {
 public:
     virtual ~LinksService() = default;
@@ -471,6 +503,7 @@ struct Services {
     std::shared_ptr<TagsService> tags;
     std::shared_ptr<LinksService> links;
     std::shared_ptr<SettingsService> settings;
+    std::shared_ptr<BackupService> backup;
     std::shared_ptr<ContentHashService> hashes; // последним: его поток останавливается первым
 };
 

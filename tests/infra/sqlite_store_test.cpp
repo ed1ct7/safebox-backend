@@ -1,5 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <fstream>
+
 #include "safebox/domain/model/safe_format.hpp"
 #include "safebox/infra/factories.hpp"
 #include "sqlite_database.hpp"
@@ -595,4 +597,116 @@ INSERT INTO meta(id, format_version, kdf_ops, kdf_mem, salt, chunk_size, envelop
     REQUIRE(tagsAgain.has_value());
     REQUIRE(tagsAgain->size() == 1);
     CHECK((*tagsAgain)[0].encNameEn == domain::toBytes("Hina"));
+}
+
+TEST_CASE("backup copies the open safe page by page, with writes made between steps",
+          "[sqlite][backup]") {
+    TempDir dir;
+    auto store = infra::makeSqliteVaultStore();
+    REQUIRE(store->create(dir / "v.safebox", sampleMeta()).has_value());
+    const auto folder = insertEntry(*store, std::nullopt, true);
+    // ~40 МиБ: копия идет несколько шагов (по 16 МиБ)
+    const auto big = writeBlob(*store, 40, 1024 * 1024);
+    insertEntry(*store, folder, false, big);
+
+    auto copy = store->backup(dir / "copy.safebox");
+    REQUIRE(copy.has_value());
+    CHECK((*copy)->bytesTotal() > 40u * 1024 * 1024);
+    CHECK((*copy)->bytesDone() == 0);
+    CHECK(std::filesystem::exists(dir / "copy.safebox.part"));
+    CHECK_FALSE(std::filesystem::exists(dir / "copy.safebox"));
+
+    auto second = store->backup(dir / "other.safebox");
+    REQUIRE_FALSE(second.has_value());
+    CHECK(second.error().code == Code::AlreadyExists);
+
+    auto first = (*copy)->step();
+    REQUIRE(first.has_value());
+    REQUIRE_FALSE(*first);
+    CHECK((*copy)->bytesDone() > 0);
+    CHECK((*copy)->bytesDone() < (*copy)->bytesTotal());
+    // правка посреди копии - и в уже скопированных страницах, и в еще нет
+    const auto late = insertEntry(*store, folder, true);
+    const auto lateBlob = writeBlob(*store, 3, 1024 * 1024);
+    insertEntry(*store, late, false, lateBlob);
+
+    int steps = 1;
+    for (;;) {
+        auto done = (*copy)->step();
+        REQUIRE(done.has_value());
+        ++steps;
+        if (*done) {
+            break;
+        }
+        REQUIRE(steps < 100);
+    }
+    CHECK(steps >= 3);
+    CHECK((*copy)->bytesDone() == (*copy)->bytesTotal());
+    CHECK(std::filesystem::exists(dir / "copy.safebox"));
+    CHECK_FALSE(std::filesystem::exists(dir / "copy.safebox.part"));
+    CHECK_FALSE(std::filesystem::exists(dir / "copy.safebox.part-journal"));
+    copy->reset(); // готовая копия деструктором не удаляется
+    CHECK(std::filesystem::exists(dir / "copy.safebox"));
+
+    // копия - полноценный сейф: те же meta, записи, куски
+    auto other = infra::makeSqliteVaultStore();
+    REQUIRE(other->open(dir / "copy.safebox").has_value());
+    CHECK(other->meta()->salt == sampleMeta().salt);
+    auto uow = other->begin();
+    REQUIRE(uow.has_value());
+    CHECK((*uow)->entries().count().value() == 4);
+    uow->reset();
+    CHECK(other->blobs().info(big)->chunkCount == 40);
+    CHECK(other->blobs().readChunk(big, 39).value() == domain::Bytes(1024 * 1024, std::byte(40)));
+    CHECK(other->blobs().readChunk(lateBlob, 2).value() ==
+          domain::Bytes(1024 * 1024, std::byte(3)));
+    other->close();
+
+    // в занятое имя - нет; после конца можно начать следующую
+    auto taken = store->backup(dir / "copy.safebox");
+    REQUIRE_FALSE(taken.has_value());
+    CHECK(taken.error().code == Code::AlreadyExists);
+    auto missingDir = store->backup(dir / "nope" / "x.safebox");
+    REQUIRE_FALSE(missingDir.has_value());
+    CHECK(missingDir.error().code == Code::InvalidArgument);
+}
+
+TEST_CASE("an unfinished backup leaves no files; close stops it", "[sqlite][backup]") {
+    TempDir dir;
+    auto store = infra::makeSqliteVaultStore();
+    REQUIRE(store->create(dir / "v.safebox", sampleMeta()).has_value());
+    insertEntry(*store, std::nullopt, false, writeBlob(*store, 40, 1024 * 1024));
+
+    {
+        auto copy = store->backup(dir / "a.safebox");
+        REQUIRE(copy.has_value());
+        REQUIRE((*copy)->step().has_value());
+    } // брошена посреди
+    CHECK_FALSE(std::filesystem::exists(dir / "a.safebox.part"));
+    CHECK_FALSE(std::filesystem::exists(dir / "a.safebox"));
+
+    // остаток прежней оборванной копии (например, после сбоя) заменяется
+    {
+        std::ofstream(dir / "b.safebox.part") << "junk";
+    }
+    auto copy = store->backup(dir / "b.safebox");
+    REQUIRE(copy.has_value());
+    REQUIRE((*copy)->step().has_value());
+    store->close(); // блокировка посреди копии
+    auto after = (*copy)->step();
+    REQUIRE_FALSE(after.has_value());
+    CHECK(after.error().code == Code::Locked);
+    copy->reset();
+    CHECK_FALSE(std::filesystem::exists(dir / "b.safebox.part"));
+    CHECK_FALSE(std::filesystem::exists(dir / "b.safebox"));
+
+    // после повторного открытия копия делается заново
+    REQUIRE(store->open(dir / "v.safebox").has_value());
+    REQUIRE(store->upgrade().has_value());
+    auto fresh = store->backup(dir / "b.safebox");
+    REQUIRE(fresh.has_value());
+    while (!(*fresh)->step().value()) {
+    }
+    CHECK(std::filesystem::exists(dir / "b.safebox"));
+    store->close();
 }

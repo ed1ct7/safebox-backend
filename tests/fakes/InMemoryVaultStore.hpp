@@ -3,9 +3,11 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -125,6 +127,8 @@ public:
 
     void close() noexcept override {
         std::scoped_lock lock(mutex_);
+        ++copyGeneration_; // идущая копия обрывается
+        copying_ = false;
         open_.reset();
         isOpen_ = false;
     }
@@ -158,6 +162,35 @@ public:
         ++compactions;
         return {};
     }
+
+    // Копия за copySteps шагов; "файл" target появляется на последнем шаге - снимок на тот
+    // момент (как у SQLite, правки между шагами попадают в копию).
+    domain::Result<std::unique_ptr<domain::VaultCopy>>
+    backup(const std::filesystem::path& target) override {
+        auto lock = lockOpen();
+        if (!lock) {
+            return std::unexpected(lock.error());
+        }
+        if (copying_) {
+            return domain::fail(domain::Error::Code::AlreadyExists, "Копия сейфа уже делается");
+        }
+        if (files_.contains(key(target))) {
+            return domain::fail(domain::Error::Code::AlreadyExists, "Файл уже существует");
+        }
+        if (copyError) {
+            return std::unexpected(*copyError);
+        }
+        copying_ = true;
+        ++copyGeneration_;
+        return std::unique_ptr<domain::VaultCopy>(
+            std::make_unique<Copy>(*this, target, copyGeneration_));
+    }
+
+    // помощники тестов: шагов в копии, вызов перед каждым шагом, отказ backup
+    std::atomic<int> copySteps{4};
+    std::function<void()> onCopyStep;
+    std::optional<domain::Error> copyError;
+    std::atomic<int> abandonedCopies{0}; // копии, брошенные до конца (".part" удален)
 
 private:
     static std::string key(const std::filesystem::path& path) {
@@ -572,6 +605,58 @@ private:
         InMemoryVaultStore& store_;
     };
 
+    class Copy final : public domain::VaultCopy {
+    public:
+        Copy(InMemoryVaultStore& store, std::filesystem::path target, std::uint64_t generation)
+            : store_(store), target_(std::move(target)), generation_(generation),
+              total_(static_cast<std::uint64_t>(store.copySteps.load())) {}
+        ~Copy() override {
+            std::scoped_lock lock(store_.mutex_);
+            if (store_.copyGeneration_ == generation_) {
+                store_.copying_ = false;
+            }
+            if (!done_) {
+                ++store_.abandonedCopies;
+            }
+        }
+
+        domain::Result<bool> step() override {
+            if (done_) {
+                return true;
+            }
+            if (store_.onCopyStep) {
+                store_.onCopyStep();
+            }
+            auto lock = store_.lockOpen();
+            if (!lock) {
+                return std::unexpected(lock.error());
+            }
+            if (store_.copyGeneration_ != generation_) {
+                return domain::fail(domain::Error::Code::Locked, "Копия прервана");
+            }
+            if (++done_steps_ < total_) {
+                return false;
+            }
+            store_.copying_ = false;
+            if (store_.files_.contains(key(target_))) {
+                return domain::fail(domain::Error::Code::AlreadyExists, "Файл уже существует");
+            }
+            store_.files_[key(target_)] = std::make_shared<Db>(*store_.open_);
+            done_ = true;
+            return true;
+        }
+        std::uint64_t bytesDone() const noexcept override { return done_steps_ * 1000; }
+        std::uint64_t bytesTotal() const noexcept override { return total_ * 1000; }
+
+    private:
+        InMemoryVaultStore& store_;
+        std::filesystem::path target_;
+        std::uint64_t generation_ = 0;
+        std::uint64_t total_ = 0;
+        std::uint64_t done_steps_ = 0;
+        bool done_ = false;
+    };
+
 public:
     std::atomic<std::uint64_t> chunkReads{
         0}; // сколько кусков прочитано (Range читает только нужные)
@@ -583,6 +668,8 @@ private:
     std::atomic<bool> isOpen_{false};
     std::atomic<std::size_t> upgrades_{0};
     std::atomic<std::thread::id> owner_{};
+    bool copying_ = false;             // под mutex_
+    std::uint64_t copyGeneration_ = 0; // под mutex_: close и новая копия обрывают старую
     Blobs blobs_{*this};
 };
 

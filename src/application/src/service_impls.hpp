@@ -32,5 +32,12 @@ public:
     virtual void start(std::weak_ptr<VaultSession> session) = 0;
 };
 [[nodiscard]] std::shared_ptr<ContentHashRunner> makeContentHashService(Ports ports);
+// Один фоновый поток на сервис.
+[[nodiscard]] std::shared_ptr<BackupService> makeBackupService(Ports ports, AppConfig config);
+
+// Путь к файлу сейфа из запроса: обрезан, UTF-8, относительный - от defaultDirectory,
+// нормализован, с именем файла. Расширение не трогает.
+[[nodiscard]] Result<std::filesystem::path>
+resolveSafePath(std::string_view raw, const std::filesystem::path& defaultDirectory);
 
 } // namespace safebox::app

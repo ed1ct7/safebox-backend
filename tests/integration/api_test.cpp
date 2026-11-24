@@ -1127,3 +1127,54 @@ TEST_CASE("a wrong password leaves an older schema untouched, the right one upgr
     post(c, "/api/v1/safe/lock", Json::object(), 204, bearer(token));
     CHECK(userVersion() == domain::kFormatVersion);
 }
+
+TEST_CASE("backup over HTTP: a copy of the open safe opens with the same password",
+          "[integration][backup]") {
+    test::TempDir dir;
+    Stack stack(dir.path());
+    auto c = stack.client();
+    const auto session =
+        post(c, "/api/v1/safe/create",
+             {{"path", "Оригинал"}, {"password", "пароль-1"}, {"confirm", "пароль-1"}}, 201);
+    auto token = session["token"].get<std::string>();
+    httplib::UploadFormDataItems items = {{"file", "первый", "Папка/a.txt", "text/plain"},
+                                          {"file", std::string(300000, 'b'), "b.bin", ""}};
+    auto imported = c.Post("/api/v1/import", bearer(token), items);
+    REQUIRE(imported);
+    REQUIRE(imported->status == 200);
+
+    const auto started = post(c, "/api/v1/safe/backup", {{"path", "Копия"}}, 202, bearer(token));
+    CHECK(started["state"] == "running");
+    const auto target = (dir.path() / domain::pathFromUtf8("Копия.safebox")).lexically_normal();
+    CHECK(started["path"] == domain::pathToUtf8(target));
+    Json backup;
+    for (int i = 0; i < 500; ++i) {
+        backup = get(c, "/api/v1/safe/status", token)["backup"];
+        if (backup["state"] != "running") {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(backup["state"] == "done");
+    CHECK(backup["bytesDone"] == backup["bytesTotal"]);
+    CHECK(std::filesystem::exists(target));
+    // тот же файл второй раз - 409
+    post(c, "/api/v1/safe/backup", {{"path", "Копия"}}, 409, bearer(token));
+
+    post(c, "/api/v1/safe/lock", Json::object(), 204, bearer(token));
+    const auto copy = post(c, "/api/v1/safe/unlock",
+                           {{"path", domain::pathToUtf8(target)}, {"password", "пароль-1"}}, 200);
+    token = copy["token"].get<std::string>();
+    const auto root = get(c, "/api/v1/entries", token);
+    CHECK(root["total"] == 2);
+    const auto folder = byName(root, "Папка");
+    const auto inside = get(
+        c, "/api/v1/entries?parentId=" + std::to_string(folder["id"].get<std::int64_t>()), token);
+    const auto file = byName(inside, "a.txt");
+    auto content =
+        c.Get("/api/v1/media/" + std::to_string(file["id"].get<std::int64_t>()) + "/content",
+              bearer(token));
+    REQUIRE(content);
+    CHECK(content->body == "первый");
+    CHECK_FALSE(get(c, "/api/v1/safe/status", token).contains("backup")); // у копии своей нет
+}

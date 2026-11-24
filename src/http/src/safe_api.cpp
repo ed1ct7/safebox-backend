@@ -37,6 +37,12 @@ void registerSafeApi(httplib::Server& server, ApiContext& ctx) {
                         body["hashes"] =
                             Json{{"pending", hashes.pending}, {"failed", hashes.failed}};
                     }
+                    if (ctx.services.backup) { // последняя копия этого открытия, если была
+                        const auto backup = ctx.services.backup->progress(*lease);
+                        if (backup.state != app::BackupState::None) {
+                            body["backup"] = toJson(backup);
+                        }
+                    }
                 }
             }
         }
@@ -97,6 +103,28 @@ void registerSafeApi(httplib::Server& server, ApiContext& ctx) {
         ctx.services.safe->lock();
         replaceHeader(res, "Set-Cookie", expiredMediaCookie());
         sendNoContent(res);
+    });
+
+    // Копия открытого сейфа в фоне: 202 и прогресс; дальше - "backup" в GET /safe/status.
+    server.Post("/api/v1/safe/backup", [&ctx](const httplib::Request& req, httplib::Response& res) {
+        auto lease = requireApi(ctx, req, res);
+        if (!lease) {
+            return;
+        }
+        auto body = readJsonObject(req, res);
+        if (!body) {
+            return;
+        }
+        auto path = requireString(*body, "path", res);
+        if (!path) {
+            return;
+        }
+        auto started = ctx.services.backup->start(*lease, *path);
+        if (!started) {
+            sendError(res, started.error());
+            return;
+        }
+        sendJson(res, toJson(*started), 202);
     });
 
     server.Post("/api/v1/safe/password", [&ctx](const httplib::Request& req,
