@@ -17,6 +17,9 @@ struct Connection {
     std::unique_ptr<Database> db; // nullptr - сейф закрыт
     std::filesystem::path path;
     std::atomic<bool> open{false};
+    // Под mutex: схема файла текущая (create, open текущей схемы, upgrade). Иначе begin()
+    // отказывает - записи старой схемы читаются и пишутся только после upgrade().
+    bool schemaCurrent = false;
     std::atomic<std::thread::id> uowOwner{};
 };
 

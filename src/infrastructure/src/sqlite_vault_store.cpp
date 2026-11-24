@@ -7,6 +7,7 @@
 #include <fstream>
 #include <system_error>
 
+#include "safebox/domain/model/safe_format.hpp"
 #include "safebox/infra/factories.hpp"
 #include "sqlite_schema.hpp"
 
@@ -585,6 +586,7 @@ Status SqliteVaultStore::create(const std::filesystem::path& path, const domain:
     }
     conn_.db = std::move(*db);
     conn_.path = path;
+    conn_.schemaCurrent = true;
     conn_.open.store(true);
     return {};
 }
@@ -607,8 +609,13 @@ Status SqliteVaultStore::open(const std::filesystem::path& path) {
     if (auto st = verifyOpened(**db); !st) {
         return st;
     }
+    auto version = (*db)->pragmaInt("user_version");
+    if (!version) {
+        return std::unexpected(version.error());
+    }
     conn_.db = std::move(*db);
     conn_.path = path;
+    conn_.schemaCurrent = *version == static_cast<std::int64_t>(domain::kFormatVersion);
     conn_.open.store(true);
     return {};
 }
@@ -618,7 +625,11 @@ Status SqliteVaultStore::upgrade() {
     if (!lock) {
         return std::unexpected(lock.error());
     }
-    return migrateIfNeeded(*conn_.db);
+    if (auto st = migrateIfNeeded(*conn_.db); !st) {
+        return st;
+    }
+    conn_.schemaCurrent = true;
+    return {};
 }
 
 Result<domain::SafeMeta> SqliteVaultStore::inspect(const std::filesystem::path& path) {
@@ -642,6 +653,7 @@ void SqliteVaultStore::close() noexcept {
         return;
     }
     conn_.open.store(false);
+    conn_.schemaCurrent = false;
     conn_.db.reset();
     removeStaleJournal(conn_.path);
     conn_.path.clear();
@@ -659,6 +671,9 @@ Result<std::unique_ptr<domain::UnitOfWork>> SqliteVaultStore::begin() {
     auto lock = lockOpen(conn_);
     if (!lock) {
         return std::unexpected(lock.error());
+    }
+    if (!conn_.schemaCurrent) {
+        return fail(Error::Code::Internal, "Схема сейфа не обновлена: сначала upgrade()");
     }
     if (auto st = conn_.db->exec("BEGIN IMMEDIATE"); !st) {
         return std::unexpected(st.error());

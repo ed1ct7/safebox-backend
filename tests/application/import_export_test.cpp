@@ -371,8 +371,16 @@ TEST_CASE("replace keeps the record and swaps only the content", "[import][UF-15
     REQUIRE(f.importFiles(s, {{"att.txt", "attached"}}, original.id).imported == 1);
     REQUIRE(f.services.entries->update(f.lease(s), original.id, {.description = "мое описание"})
                 .has_value());
-    RawVault(f).editMeta(original.id,
-                         [](domain::EntryMeta& meta) { meta.tags = {{7, true}, {9, false}}; });
+    RawVault(f).editMeta(original.id, [](domain::EntryMeta& meta) {
+        meta.tags = {{7, true}, {9, false}};
+        // layout 3: откуда запись - свойство записи, хеш/кадр/длительность - свойства содержимого
+        meta.source = "telegram";
+        meta.sourceUrl = "https://t.me/c/1/2";
+        meta.sourceDate = 1'700'000'000'000;
+        meta.sha256 = domain::Sha256{std::byte{0xAB}};
+        meta.dimensions = domain::Dimensions{640, 480};
+        meta.durationMs = 12'345;
+    });
     const auto before = f.entryNamed(s, "a.jpg", pict.id);
     REQUIRE(before.meta.tags.size() == 2);
     const auto oldBlob = blobOf(before);
@@ -404,6 +412,12 @@ TEST_CASE("replace keeps the record and swaps only the content", "[import][UF-15
     CHECK(after.meta.sourceModifiedAt == 2'000);
     CHECK_FALSE(after.hasThumbnail());
     CHECK(f.readContent(s, after.id) == data);
+    CHECK(after.meta.source == "telegram");
+    CHECK(after.meta.sourceUrl == "https://t.me/c/1/2");
+    CHECK(after.meta.sourceDate == 1'700'000'000'000);
+    CHECK_FALSE(after.meta.sha256); // описывали прежнее содержимое
+    CHECK_FALSE(after.meta.dimensions);
+    CHECK_FALSE(after.meta.durationMs);
 
     // старые блоб и миниатюра ушли, мусора нет
     auto db = f.store.database(f.safePath());

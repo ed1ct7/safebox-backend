@@ -440,6 +440,7 @@ TEST_CASE("a v3 safe migrates to v4 on upgrade: only the version changes",
     auto store = infra::makeSqliteVaultStore();
     REQUIRE(store->open(path).has_value()); // open схему не трогает: meta читается и так
     CHECK(store->meta().has_value());
+    CHECK_FALSE(store->begin().has_value()); // а записи - только после upgrade()
     store->close();
     CHECK(userVersionOf(path) == 3);
     CHECK(readFile(path) == before);

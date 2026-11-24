@@ -500,6 +500,11 @@ private:
         meta.blobId = file.writer->id();
         meta.thumbBlobId = file.thumbBlob;
         meta.sourceModifiedAt = file.sourceModifiedAt;
+        // Описывали прежнее содержимое (при замене); у нового их пока никто не считает.
+        // Откуда запись (source, sourceUrl, sourceDate) - свойство записи, остается.
+        meta.sha256.reset();
+        meta.dimensions.reset();
+        meta.durationMs.reset();
     }
 
     Result<EntryId> insertEntry(domain::UnitOfWork& uow, std::int64_t now) {
