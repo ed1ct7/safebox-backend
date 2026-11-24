@@ -263,11 +263,9 @@ public:
                 return std::unexpected(st.error());
             }
         }
-        ctx->session.invalidateCatalog();
+        ctx->session.catalogChanged({.entries = {id}});
         // Дети и унаследованные теги от правки этих полей не меняются - берем из снимка.
-        if (const auto* node = (*catalog)->find(id)) {
-            entry.childCount = node->childCount;
-        }
+        entry.childCount = (*catalog)->childCount(id);
         entry.inheritedTags = (*catalog)->inheritedTags(id);
         entry.previewPending =
             entry.meta.kind == domain::Kind::Link && ctx->session.previewPending(id);
@@ -309,12 +307,14 @@ public:
             return result;
         }
         const Sealer& sealer = *ctx->sealer;
+        CatalogChanges changed;
         {
             auto uow = ports_.store.begin();
             if (!uow) {
                 return std::unexpected(uow.error());
             }
             std::vector<EntryId> replaced;
+            changed.entries.reserve(plan->steps.size());
             for (const auto& step : plan->steps) {
                 if (step.skip) {
                     ++result.skipped;
@@ -336,8 +336,10 @@ public:
                     return std::unexpected(st.error());
                 }
                 ++result.moved;
+                changed.entries.push_back(step.id);
                 if (step.replaces) {
                     replaced.push_back(*step.replaces);
+                    changed.entries.push_back(*step.replaces);
                 }
             }
             for (const auto id : replaced) {
@@ -350,7 +352,7 @@ public:
                 return std::unexpected(st.error());
             }
         }
-        ctx->session.invalidateCatalog();
+        ctx->session.catalogChanged(changed);
         if (result.replaced > 0) {
             (void)ports_.store.compact();
         }
@@ -385,7 +387,7 @@ public:
                 return std::unexpected(st.error());
             }
         }
-        ctx->session.invalidateCatalog();
+        ctx->session.catalogChanged({.entries = {ids.begin(), ids.end()}});
         (void)ports_.store.compact(); // место вернется файлу; сбой здесь не отменяет удаление
         return removed.size();
     }

@@ -448,7 +448,7 @@ TEST_CASE("loadCatalog reads entries, categories and tags and checks their ids",
     REQUIRE(loaded.has_value());
     const Catalog& catalog = **loaded;
     REQUIRE(catalog.nodes().size() == 1);
-    const auto& folder = catalog.nodes().begin()->second;
+    const auto& folder = *catalog.nodes().begin()->second;
     CHECK(folder.entry.name == "Поездки");
     CHECK(folder.foldedDescription == "летом");
     CHECK(catalog.categories().size() == 2);

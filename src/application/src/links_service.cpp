@@ -215,6 +215,7 @@ public:
             std::string url;
         };
         std::vector<Created> created;
+        CatalogChanges changed;
         {
             auto uow = ports_.store.begin();
             if (!uow) {
@@ -286,8 +287,13 @@ public:
             if (auto st = tx.commit(); !st) {
                 return std::unexpected(st.error());
             }
+            changed.entries = paths.created();
         }
-        ctx->session.invalidateCatalog();
+        for (const auto& link : created) {
+            changed.entries.push_back(link.id);
+        }
+        ctx->session.catalogChanged(changed);
+        catalog->reset(); // снимок больше не нужен: каталог поправится без копии
 
         if (settings_->get().linkPreviews) {
             std::vector<PreviewJob> jobs;
@@ -493,11 +499,11 @@ private:
             }
             return entry;
         }
-        ctx->session.invalidateCatalog();
+        ctx->session.catalogChanged({.entries = {id}});
         if (oldThumb) {
             (void)ports_.store.compact(); // старая миниатюра освободила место в файле
         }
-        entry->childCount = node->childCount;
+        entry->childCount = (*catalog)->childCount(id);
         entry->inheritedTags = (*catalog)->inheritedTags(id);
         entry->previewPending = ctx->session.previewPending(id);
         return entry;

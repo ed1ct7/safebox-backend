@@ -60,13 +60,15 @@ public:
                 std::optional<domain::EntryId> root, VaultSession::CatalogPtr snapshot);
 
     // Папка dirs внутри root (nullopt - сам root, если он корень); недостающие создаются.
-    // uow - транзакция вызывающего: коммит и invalidateCatalog на нем. nullptr - каждая новая
-    // папка сохраняется своей транзакцией (импорт пишет файлы отдельно от нее).
+    // uow - транзакция вызывающего: коммит и catalogChanged(created()) на нем. nullptr - каждая
+    // новая папка сохраняется своей транзакцией (импорт пишет файлы отдельно от нее).
     [[nodiscard]] domain::Result<std::optional<domain::EntryId>>
     resolve(const std::vector<std::string>& dirs, domain::UnitOfWork* uow = nullptr);
 
     // Занятые имена у parent: снимок плюс созданное через этот объект и добавленное add().
     [[nodiscard]] Siblings& siblingsOf(std::optional<domain::EntryId> parent);
+    // Папки, созданные в транзакции вызывающего.
+    [[nodiscard]] const std::vector<domain::EntryId>& created() const noexcept { return created_; }
 
 private:
     // Своя транзакция на одну папку.
@@ -82,6 +84,7 @@ private:
     std::optional<domain::EntryId> root_;
     VaultSession::CatalogPtr snapshot_;
     std::map<std::string, domain::EntryId> folders_; // "a/b/" (folded) -> найденная или созданная
+    std::vector<domain::EntryId> created_;           // в транзакции вызывающего
     std::map<std::optional<domain::EntryId>, Siblings> siblings_; // родитель -> занятые имена
 };
 

@@ -1,6 +1,7 @@
 // Аренды: счетчик + condvar. beginClose() запрещает новые и ставит флаг отмены,
 // waitForLeases() ждет ноль.
-// Кеш имен строится лениво, generation не дает сохранить устаревший снимок
+// Кеш имен строится лениво и дальше правится по отмеченным изменениям; generation не дает
+// сохранить устаревший снимок
 #include "vault_session.hpp"
 
 #include <algorithm>
@@ -124,14 +125,19 @@ std::string uniqueName(std::string_view name, bool isFolder,
 
 // Catalog
 
+Catalog::Node::~Node() {
+    domain::secureWipe(entry.name);
+    domain::secureWipe(folded);
+    domain::secureWipe(foldedDescription);
+    domain::secureWipe(entry.meta.url);
+    domain::secureWipe(entry.meta.description);
+}
+
 Catalog::~Catalog() {
-    for (auto& [id, node] : nodes_) {
-        domain::secureWipe(node.entry.name);
-        domain::secureWipe(node.folded);
-        domain::secureWipe(node.foldedDescription);
-        domain::secureWipe(node.entry.meta.url);
-        domain::secureWipe(node.entry.meta.description);
-    }
+    wipeTags();
+}
+
+void Catalog::wipeTags() noexcept {
     for (auto& [id, node] : categories_) {
         domain::secureWipe(node.category.name);
         domain::secureWipe(node.category.nameEn);
@@ -146,12 +152,21 @@ Catalog::~Catalog() {
     }
 }
 
+namespace {
+
+Catalog::NodePtr makeNode(domain::Entry entry) {
+    auto node = std::make_shared<Catalog::Node>();
+    node->folded = foldForSearch(entry.name);
+    node->foldedDescription = foldForSearch(entry.meta.description);
+    node->entry = std::move(entry);
+    return node;
+}
+
+} // namespace
+
 void Catalog::add(domain::Entry entry) {
-    auto folded = foldForSearch(entry.name);
-    auto foldedDescription = foldForSearch(entry.meta.description);
     const auto id = entry.id;
-    nodes_.insert_or_assign(
-        id, Node{std::move(entry), std::move(folded), std::move(foldedDescription), 0});
+    nodes_.insert_or_assign(id, makeNode(std::move(entry)));
 }
 
 void Catalog::addCategory(domain::TagCategory category) {
@@ -172,9 +187,9 @@ void Catalog::addTag(domain::Tag tag) {
 void Catalog::finalize() {
     children_.clear();
     roots_.clear();
-    for (auto& [id, node] : nodes_) {
-        node.childCount = 0;
-        const auto& parent = node.entry.parentId;
+    hasCycles_ = false;
+    for (const auto& [id, node] : nodes_) {
+        const auto& parent = node->entry.parentId;
         if (parent && *parent != id && nodes_.contains(*parent)) {
             children_[*parent].push_back(id);
         } else {
@@ -197,29 +212,132 @@ void Catalog::finalize() {
     for (const auto& [id, node] : nodes_) {
         if (!reachable.contains(id)) {
             roots_.push_back(id);
+            hasCycles_ = true;
         }
     }
-    const auto less = [this](EntryId a, EntryId b) {
-        const auto& na = nodes_.at(a);
-        const auto& nb = nodes_.at(b);
-        if (na.entry.isFolder() != nb.entry.isFolder()) {
-            return na.entry.isFolder();
-        }
-        if (na.folded != nb.folded) {
-            return na.folded < nb.folded;
-        }
-        return a < b;
-    };
+    const auto less = [this](EntryId a, EntryId b) { return before(a, b); };
     std::sort(roots_.begin(), roots_.end(), less);
     for (auto& [parent, list] : children_) {
         std::sort(list.begin(), list.end(), less);
-        nodes_.at(parent).childCount = list.size();
     }
+}
+
+bool Catalog::before(EntryId a, EntryId b) const {
+    const auto& na = *nodes_.at(a);
+    const auto& nb = *nodes_.at(b);
+    if (na.entry.isFolder() != nb.entry.isFolder()) {
+        return na.entry.isFolder();
+    }
+    if (na.folded != nb.folded) {
+        return na.folded < nb.folded;
+    }
+    return a < b;
+}
+
+std::vector<EntryId>* Catalog::placeOf(const Node& node, bool create) {
+    const auto& parent = node.entry.parentId;
+    if (!parent || *parent == node.entry.id || !nodes_.contains(*parent)) {
+        return &roots_;
+    }
+    if (create) {
+        return &children_[*parent];
+    }
+    const auto it = children_.find(*parent);
+    return it == children_.end() ? nullptr : &it->second;
+}
+
+void Catalog::unlink(EntryId id) {
+    auto* list = placeOf(*nodes_.at(id), false);
+    if (list == nullptr) {
+        return;
+    }
+    const auto pos = std::lower_bound(list->begin(), list->end(), id,
+                                      [this](EntryId a, EntryId b) { return before(a, b); });
+    if (pos != list->end() && *pos == id) {
+        list->erase(pos);
+    }
+}
+
+std::shared_ptr<Catalog> Catalog::clone() const {
+    return std::shared_ptr<Catalog>(new Catalog(*this));
+}
+
+void Catalog::erase(std::span<const EntryId> ids, const std::unordered_set<EntryId>& keep) {
+    std::vector<EntryId> stack;
+    for (const auto id : ids) {
+        if (!nodes_.contains(id)) {
+            continue; // уже ушла с предком
+        }
+        unlink(id);
+        stack.assign(1, id);
+        while (!stack.empty()) {
+            const auto current = stack.back();
+            stack.pop_back();
+            if (const auto it = children_.find(current); it != children_.end()) {
+                for (const auto child : it->second) {
+                    if (!keep.contains(child)) {
+                        stack.push_back(child);
+                    } // оставленную upsert поставит на новое место
+                }
+                children_.erase(it);
+            }
+            nodes_.erase(current);
+        }
+    }
+}
+
+bool Catalog::upsert(std::vector<domain::Entry> entries) {
+    if (hasCycles_) {
+        return false;
+    }
+    for (const auto& entry : entries) {
+        if (nodes_.contains(entry.id)) {
+            unlink(entry.id); // по старому узлу: место в списке считается по старому имени
+        }
+    }
+    std::vector<EntryId> ids;
+    ids.reserve(entries.size());
+    for (auto& entry : entries) {
+        const auto id = entry.id;
+        ids.push_back(id);
+        nodes_.insert_or_assign(id, makeNode(std::move(entry)));
+    }
+    for (const auto id : ids) {
+        const auto& parent = nodes_.at(id)->entry.parentId;
+        if (parent && isAncestorOrSelf(id, *parent)) {
+            return false; // запись стала своим предком
+        }
+    }
+    for (const auto id : ids) {
+        auto& list = *placeOf(*nodes_.at(id), true);
+        list.insert(std::lower_bound(list.begin(), list.end(), id,
+                                     [this](EntryId a, EntryId b) { return before(a, b); }),
+                    id);
+    }
+    return true;
+}
+
+void Catalog::replaceTags(std::vector<domain::TagCategory> categories,
+                          std::vector<domain::Tag> tags) {
+    wipeTags();
+    categories_.clear();
+    tags_.clear();
+    for (auto& category : categories) {
+        addCategory(std::move(category));
+    }
+    for (auto& tag : tags) {
+        addTag(std::move(tag));
+    }
+}
+
+std::size_t Catalog::childCount(EntryId id) const {
+    const auto it = children_.find(id);
+    return it == children_.end() ? 0 : it->second.size();
 }
 
 const Catalog::Node* Catalog::find(EntryId id) const {
     const auto it = nodes_.find(id);
-    return it == nodes_.end() ? nullptr : &it->second;
+    return it == nodes_.end() ? nullptr : it->second.get();
 }
 
 const std::vector<EntryId>& Catalog::childrenOf(std::optional<EntryId> parent) const {
@@ -295,7 +413,7 @@ bool Catalog::isAncestorOrSelf(EntryId ancestor, EntryId id) const {
 
 domain::Entry Catalog::describe(const Node& node) const {
     auto entry = node.entry;
-    entry.childCount = node.childCount;
+    entry.childCount = childCount(entry.id);
     entry.inheritedTags = inheritedTags(entry.id);
     return entry;
 }
@@ -330,6 +448,9 @@ std::vector<domain::PathItem> Catalog::pathTo(EntryId id) const {
 
 namespace {
 constexpr std::size_t kMaxTokens = 64; // 32 входа (вкладки/перезагрузки) на сессию
+// Больше изменений между чтениями - каталог строится заново: перечитать все быстрее, чем по
+// одной строке.
+constexpr std::size_t kMaxPendingEntries = 20'000;
 }
 
 VaultSession::VaultSession(std::uint64_t epoch, std::filesystem::path path, domain::SafeMeta meta,
@@ -417,6 +538,8 @@ void VaultSession::wipe() noexcept {
         sealer = std::move(sealer_);
         catalog = std::move(catalog_);
         ++catalogGeneration_;
+        pendingEntries_.clear();
+        pendingTags_ = false;
         previewPending_.clear();
         for (auto& t : tokens_) {
             domain::secureWipe(t.value);
@@ -444,34 +567,78 @@ std::chrono::seconds VaultSession::idleRemaining(MonoTime now) const {
     return idle_.idleRemaining(now);
 }
 
-Result<VaultSession::CatalogPtr> VaultSession::catalog(const Loader& load) {
+Result<VaultSession::CatalogPtr> VaultSession::catalog(const Loader& load, const Patcher& patch) {
     std::scoped_lock build(catalogBuildMutex_);
     std::uint64_t generation = 0;
+    std::shared_ptr<Catalog> current;
+    CatalogChanges changes;
     {
         std::scoped_lock lock(mutex_);
-        if (catalog_) {
-            return catalog_;
+        if (catalog_ && pendingEntries_.empty() && !pendingTags_) {
+            return CatalogPtr(catalog_);
         }
         if (!sealer_) {
             return fail(Error::Code::Locked, "Сейф заблокирован");
         }
         generation = catalogGeneration_;
+        // Изменения, отмеченные после этой точки, останутся на следующее чтение. Без каталога
+        // их и так прочитает полная загрузка: она начинается позже их коммита.
+        current = std::move(catalog_);
+        changes.entries.assign(pendingEntries_.begin(), pendingEntries_.end());
+        changes.tags = pendingTags_;
+        pendingEntries_.clear();
+        pendingTags_ = false;
     }
-    auto built = load();
-    if (!built) {
-        return std::unexpected(built.error());
+    std::shared_ptr<Catalog> result;
+    if (current) {
+        // Каталог держит только сессия (новые читатели ждут build) - правим на месте, иначе
+        // правим копию: у читателей остается их снимок.
+        if (current.use_count() != 1) {
+            current = current->clone();
+        }
+        if (auto patched = patch(*current, changes); patched && *patched) {
+            result = std::move(current);
+        }
+        current.reset(); // неудачная правка: каталог испорчен, строим заново
+    }
+    if (!result) {
+        auto built = load();
+        if (!built) {
+            return std::unexpected(built.error());
+        }
+        result = std::move(*built);
     }
     std::scoped_lock lock(mutex_);
     if (generation == catalogGeneration_) {
-        catalog_ = *built;
+        catalog_ = result;
     }
-    return *built;
+    return CatalogPtr(std::move(result));
+}
+
+void VaultSession::catalogChanged(const CatalogChanges& changes) noexcept {
+    std::shared_ptr<Catalog> dropped; // освобождается вне мьютекса
+    std::scoped_lock lock(mutex_);
+    try {
+        pendingEntries_.insert(changes.entries.begin(), changes.entries.end());
+        pendingTags_ = pendingTags_ || changes.tags;
+        if (pendingEntries_.size() <= kMaxPendingEntries) {
+            return;
+        }
+    } catch (...) { // нехватка памяти: проще построить заново
+    }
+    ++catalogGeneration_;
+    dropped = std::move(catalog_);
+    pendingEntries_.clear();
+    pendingTags_ = false;
 }
 
 void VaultSession::invalidateCatalog() noexcept {
+    std::shared_ptr<Catalog> dropped;
     std::scoped_lock lock(mutex_);
     ++catalogGeneration_;
-    catalog_.reset();
+    dropped = std::move(catalog_);
+    pendingEntries_.clear();
+    pendingTags_ = false;
 }
 
 void VaultSession::setPreviewPending(domain::EntryId id, bool pending) {
@@ -552,7 +719,7 @@ Result<OperationContext> contextOf(const Lease& lease) {
     return OperationContext{*session, std::move(sealer)};
 }
 
-Result<VaultSession::CatalogPtr> loadCatalog(domain::VaultStore& store, const Sealer& sealer) {
+Result<std::shared_ptr<Catalog>> loadCatalog(domain::VaultStore& store, const Sealer& sealer) {
     std::vector<domain::EntryRecord> rows;
     std::vector<domain::TagCategoryRecord> categoryRows;
     std::vector<domain::TagRecord> tagRows;
@@ -600,12 +767,87 @@ Result<VaultSession::CatalogPtr> loadCatalog(domain::VaultStore& store, const Se
         catalog->addTag(std::move(*tag));
     }
     catalog->finalize();
-    return VaultSession::CatalogPtr(std::move(catalog));
+    return catalog;
+}
+
+Result<bool> patchCatalog(Catalog& catalog, const CatalogChanges& changes,
+                          domain::VaultStore& store, const Sealer& sealer) {
+    std::vector<domain::EntryRecord> rows;
+    std::vector<EntryId> gone;
+    std::vector<domain::TagCategoryRecord> categoryRows;
+    std::vector<domain::TagRecord> tagRows;
+    {
+        auto uow = store.begin();
+        if (!uow) {
+            return std::unexpected(uow.error());
+        }
+        rows.reserve(changes.entries.size());
+        for (const auto id : changes.entries) {
+            auto row = (*uow)->entries().get(id);
+            if (row) {
+                rows.push_back(std::move(*row));
+            } else if (row.error().code == Error::Code::NotFound) {
+                gone.push_back(id);
+            } else {
+                return std::unexpected(row.error());
+            }
+        }
+        if (changes.tags) {
+            auto categories = (*uow)->tags().categories();
+            if (!categories) {
+                return std::unexpected(categories.error());
+            }
+            auto tags = (*uow)->tags().tags();
+            if (!tags) {
+                return std::unexpected(tags.error());
+            }
+            categoryRows = std::move(*categories);
+            tagRows = std::move(*tags);
+        }
+    } // только чтение
+    std::vector<domain::Entry> entries;
+    entries.reserve(rows.size());
+    std::unordered_set<EntryId> keep;
+    for (const auto& row : rows) {
+        auto entry = sealer.openEntry(row);
+        if (!entry) {
+            return std::unexpected(entry.error());
+        }
+        keep.insert(row.id);
+        entries.push_back(std::move(*entry));
+    }
+    std::vector<domain::TagCategory> categories;
+    std::vector<domain::Tag> tags;
+    for (const auto& row : categoryRows) {
+        auto category = sealer.openCategory(row);
+        if (!category) {
+            return std::unexpected(category.error());
+        }
+        categories.push_back(std::move(*category));
+    }
+    for (const auto& row : tagRows) {
+        auto tag = sealer.openTag(row);
+        if (!tag) {
+            return std::unexpected(tag.error());
+        }
+        tags.push_back(std::move(*tag));
+    }
+    catalog.erase(gone, keep);
+    if (!catalog.upsert(std::move(entries))) {
+        return false;
+    }
+    if (changes.tags) {
+        catalog.replaceTags(std::move(categories), std::move(tags));
+    }
+    return true;
 }
 
 Result<VaultSession::CatalogPtr> catalogOf(const OperationContext& ctx, domain::VaultStore& store) {
     const auto& sealer = *ctx.sealer;
-    return ctx.session.catalog([&store, &sealer] { return loadCatalog(store, sealer); });
+    return ctx.session.catalog([&store, &sealer] { return loadCatalog(store, sealer); },
+                               [&store, &sealer](Catalog& catalog, const CatalogChanges& changes) {
+                                   return patchCatalog(catalog, changes, store, sealer);
+                               });
 }
 
 domain::Result<domain::BlobId> writeBlob(domain::BlobStore& blobs, const Sealer& sealer,

@@ -41,12 +41,15 @@ namespace safebox::app {
 
 class Catalog {
 public:
+    // Узел не меняется после создания и делится между копиями каталога (clone): правка записи
+    // заменяет узел целиком. Имена стирает последний владелец.
     struct Node {
         domain::Entry entry; // без childCount и inheritedTags - их выдает describe()
         std::string folded;  // foldForSearch(entry.name)
         std::string foldedDescription;
-        std::size_t childCount = 0; // прямых детей
+        ~Node();
     };
+    using NodePtr = std::shared_ptr<const Node>;
     struct CategoryNode {
         domain::TagCategory category;
         std::string folded;   // foldForSearch(name)
@@ -59,9 +62,8 @@ public:
     };
 
     Catalog() = default;
-    Catalog(const Catalog&) = delete;
     Catalog& operator=(const Catalog&) = delete;
-    ~Catalog(); // имена стираются из памяти
+    ~Catalog(); // имена категорий и тегов стираются из памяти (записей - в ~Node)
 
     void add(domain::Entry entry);
     void addCategory(domain::TagCategory category);
@@ -70,14 +72,27 @@ public:
     // Сироты (родитель не найден) и циклы показываются в корне, а не теряются.
     void finalize();
 
+    // Правки готового каталога (после finalize). Копия делит узлы с оригиналом.
+    [[nodiscard]] std::shared_ptr<Catalog> clone() const;
+    // Записи, которых больше нет в сейфе, уходят с потомками; спуск останавливается на keep -
+    // записях, которые есть в сейфе (их могли перенести из удаленной папки, и детей с ними).
+    void erase(std::span<const domain::EntryId> ids,
+               const std::unordered_set<domain::EntryId>& keep);
+    // Новые и измененные записи встают на места по своим parentId. false - правку этим путем
+    // не сделать (цикл в каталоге или в правке): каталог испорчен, его надо построить заново.
+    [[nodiscard]] bool upsert(std::vector<domain::Entry> entries);
+    // Все категории и теги заново.
+    void replaceTags(std::vector<domain::TagCategory> categories, std::vector<domain::Tag> tags);
+
     [[nodiscard]] const Node* find(domain::EntryId id) const;
     [[nodiscard]] const std::vector<domain::EntryId>&
     childrenOf(std::optional<domain::EntryId> parent) const;
     // Путь от корня до id включительно; устойчив к циклам в parent_id.
     [[nodiscard]] std::vector<domain::PathItem> pathTo(domain::EntryId id) const;
-    [[nodiscard]] const std::unordered_map<domain::EntryId, Node>& nodes() const noexcept {
+    [[nodiscard]] const std::unordered_map<domain::EntryId, NodePtr>& nodes() const noexcept {
         return nodes_;
     }
+    [[nodiscard]] std::size_t childCount(domain::EntryId id) const; // прямых детей
 
     // Теги с inherit у предков (устойчиво к циклам): ближайший предок побеждает, теги, уже
     // прямые у самой записи, не повторяются. По возрастанию tagId.
@@ -100,18 +115,36 @@ public:
     [[nodiscard]] const TagNode* findTag(domain::TagId id) const;
 
 private:
-    std::unordered_map<domain::EntryId, Node> nodes_;
+    Catalog(const Catalog&) = default; // для clone: узлы общие, категории и теги - копии
+
+    [[nodiscard]] bool before(domain::EntryId a, domain::EntryId b) const;
+    // Список, в котором стоит запись: дети родителя или корень (родителя нет в каталоге);
+    // nullptr - у родителя нет списка детей (create = false).
+    [[nodiscard]] std::vector<domain::EntryId>* placeOf(const Node& node, bool create);
+    void unlink(domain::EntryId id); // из списка по текущему узлу; нет там - ничего
+    void wipeTags() noexcept;
+
+    std::unordered_map<domain::EntryId, NodePtr> nodes_;
     std::unordered_map<domain::CategoryId, CategoryNode> categories_;
     std::unordered_map<domain::TagId, TagNode> tags_;
     std::unordered_map<domain::EntryId, std::vector<domain::EntryId>> children_;
     std::vector<domain::EntryId> roots_;
+    bool hasCycles_ = false; // в файле цикл parent_id: правки только полной перестройкой
+};
+
+// Что изменилось в сейфе после коммита: каталог перечитает только это.
+struct CatalogChanges {
+    std::vector<domain::EntryId> entries; // созданные, измененные и удаленные (с поддеревом)
+    bool tags = false;                    // категории и теги
 };
 
 class VaultSession {
 public:
     using MonoTime = domain::Clock::MonoTime;
     using CatalogPtr = std::shared_ptr<const Catalog>;
-    using Loader = std::function<domain::Result<CatalogPtr>()>;
+    using Loader = std::function<domain::Result<std::shared_ptr<Catalog>>()>;
+    // Правит каталог по накопленным изменениям; false или ошибка - построить заново.
+    using Patcher = std::function<domain::Result<bool>(Catalog&, const CatalogChanges&)>;
 
     VaultSession(std::uint64_t epoch, std::filesystem::path path, domain::SafeMeta meta,
                  std::shared_ptr<const Sealer> sealer, IdlePolicy idle);
@@ -144,9 +177,11 @@ public:
     [[nodiscard]] bool idleExpired(MonoTime now) const;
     [[nodiscard]] std::chrono::seconds idleRemaining(MonoTime now) const;
 
-    // кэш расшифрованных имен
-    [[nodiscard]] domain::Result<CatalogPtr> catalog(const Loader& load);
-    void invalidateCatalog() noexcept;
+    // кэш расшифрованных имен: строится целиком при первом чтении, дальше правится по
+    // изменениям, отмеченным catalogChanged() (их применяет следующее чтение).
+    [[nodiscard]] domain::Result<CatalogPtr> catalog(const Loader& load, const Patcher& patch);
+    void catalogChanged(const CatalogChanges& changes) noexcept; // после коммита
+    void invalidateCatalog() noexcept;                           // следующее чтение - с нуля
 
     // Ссылки, ждущие предпросмотра: очередь и ее задания у LinksService, а признак для ответов
     // хранит сессия - с блокировкой он исчезает вместе с ней.
@@ -168,8 +203,10 @@ private:
     std::shared_ptr<const Sealer> sealer_;
     std::vector<Token> tokens_;
     IdlePolicy idle_;
-    CatalogPtr catalog_;
+    std::shared_ptr<Catalog> catalog_;
     std::uint64_t catalogGeneration_ = 0;
+    std::unordered_set<domain::EntryId> pendingEntries_; // изменения после построения catalog_
+    bool pendingTags_ = false;
     std::unordered_set<domain::EntryId> previewPending_;
 
     std::mutex catalogBuildMutex_; // один построитель кэша за раз
@@ -194,8 +231,11 @@ struct OperationContext {
 // Аренда -> сессия и ключи; закрывающийся/стертый сейф -> Locked.
 [[nodiscard]] domain::Result<OperationContext> contextOf(const Lease& lease);
 // Записи, категории и теги одной транзакцией -> расшифровка вне мьютекса хранилища.
-[[nodiscard]] domain::Result<VaultSession::CatalogPtr> loadCatalog(domain::VaultStore& store,
+[[nodiscard]] domain::Result<std::shared_ptr<Catalog>> loadCatalog(domain::VaultStore& store,
                                                                    const Sealer& sealer);
+// Перечитывает изменившиеся строки одной транзакцией и правит ими каталог.
+[[nodiscard]] domain::Result<bool> patchCatalog(Catalog& catalog, const CatalogChanges& changes,
+                                                domain::VaultStore& store, const Sealer& sealer);
 [[nodiscard]] domain::Result<VaultSession::CatalogPtr> catalogOf(const OperationContext& ctx,
                                                                  domain::VaultStore& store);
 // Небольшой блоб целиком из памяти (миниатюра): pending, пока запись не сделает promote.

@@ -485,7 +485,7 @@ private:
             // следующие файлы партии с этим именем уже конфликтуют с ним
             paths_.siblingsOf(file.parent).add(foldForSearch(file.name), {*id, false});
         }
-        session_.invalidateCatalog();
+        session_.catalogChanged({.entries = {*id}});
         return {};
     }
 
@@ -747,7 +747,7 @@ public:
         if (root == nullptr) {
             return fail(Error::Code::NotFound, "Объект не найден");
         }
-        if (!root->entry.isFolder() && root->childCount == 0) {
+        if (!root->entry.isFolder() && cat.childCount(id) == 0) {
             return fail(Error::Code::InvalidArgument,
                         "Архивом скачивается папка или запись с вложениями");
         }
@@ -781,7 +781,7 @@ public:
             }
             for (auto& child : children) {
                 const auto* node = cat.find(child.id);
-                if (!node->entry.isFolder() && node->childCount > 0) {
+                if (!node->entry.isFolder() && cat.childCount(child.id) > 0) {
                     child.attachments =
                         names.take(child.leaf + std::string(kAttachmentsSuffix), true);
                 }

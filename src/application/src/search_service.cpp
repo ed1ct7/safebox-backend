@@ -108,7 +108,7 @@ public:
         } else {
             scope.reserve(cat.nodes().size());
             for (const auto& [id, node] : cat.nodes()) {
-                scope.push_back(&node);
+                scope.push_back(node.get());
             }
         }
 

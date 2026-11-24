@@ -68,7 +68,7 @@ const Catalog::TagNode* tagNamed(const Catalog& cat, CategoryId category, const 
 std::unordered_map<TagId, std::size_t> directCounts(const Catalog& cat) {
     std::unordered_map<TagId, std::size_t> counts;
     for (const auto& [id, node] : cat.nodes()) {
-        for (const auto& assignment : node.entry.meta.tags) {
+        for (const auto& assignment : node->entry.meta.tags) {
             ++counts[assignment.tagId];
         }
     }
@@ -100,7 +100,7 @@ CategoryWithTags describeCategory(const Catalog& cat, const Catalog::CategoryNod
 std::vector<EntryId> holdersOf(const Catalog& cat, const std::unordered_set<TagId>& tags) {
     std::vector<EntryId> ids;
     for (const auto& [id, node] : cat.nodes()) {
-        const auto& assigned = node.entry.meta.tags;
+        const auto& assigned = node->entry.meta.tags;
         if (std::any_of(assigned.begin(), assigned.end(),
                         [&](const auto& a) { return tags.contains(a.tagId); })) {
             ids.push_back(id);
@@ -273,7 +273,7 @@ public:
         if (auto st = (*uow)->commit(); !st) {
             return std::unexpected(st.error());
         }
-        snap->ctx.session.invalidateCatalog();
+        snap->ctx.session.catalogChanged({.tags = true});
         return domain::TagCategory{*id, std::move(*clean), std::move(*cleanEn)};
     }
 
@@ -347,7 +347,7 @@ public:
         if (auto st = (*uow)->commit(); !st) {
             return std::unexpected(st.error());
         }
-        snap->ctx.session.invalidateCatalog();
+        snap->ctx.session.catalogChanged({.tags = true});
         out.category = std::move(updated);
         return out;
     }
@@ -368,6 +368,7 @@ public:
                 doomed.insert(tagId);
             }
         }
+        const auto holders = holdersOf(cat, doomed);
         RemovedTags removed;
         removed.removedTags = doomed.size();
         {
@@ -375,8 +376,7 @@ public:
             if (!uow) {
                 return std::unexpected(uow.error());
             }
-            auto changed =
-                editEntries(**uow, *snap->ctx.sealer, holdersOf(cat, doomed), stripping(doomed));
+            auto changed = editEntries(**uow, *snap->ctx.sealer, holders, stripping(doomed));
             if (!changed) {
                 return std::unexpected(changed.error());
             }
@@ -388,7 +388,7 @@ public:
                 return std::unexpected(st.error());
             }
         }
-        snap->ctx.session.invalidateCatalog();
+        snap->ctx.session.catalogChanged({.entries = holders, .tags = true});
         return removed;
     }
 
@@ -446,7 +446,7 @@ public:
         if (auto st = (*uow)->commit(); !st) {
             return std::unexpected(st.error());
         }
-        snap->ctx.session.invalidateCatalog();
+        snap->ctx.session.catalogChanged({.tags = true});
         return CreatedTag{
             domain::Tag{*tagId, categoryId, std::move(*tagName), std::move(*tagNameEn)}, true};
     }
@@ -523,7 +523,7 @@ public:
         if (auto st = (*uow)->commit(); !st) {
             return std::unexpected(st.error());
         }
-        snap->ctx.session.invalidateCatalog();
+        snap->ctx.session.catalogChanged({.tags = true});
         return updated;
     }
 
@@ -637,7 +637,7 @@ public:
                 return std::unexpected(st.error());
             }
         }
-        snap->ctx.session.invalidateCatalog();
+        snap->ctx.session.catalogChanged({.entries = ids});
         return changed;
     }
 
@@ -664,7 +664,7 @@ private:
                 return std::unexpected(st.error());
             }
         }
-        snap.ctx.session.invalidateCatalog();
+        snap.ctx.session.catalogChanged({.entries = ids, .tags = true});
         return changed;
     }
 

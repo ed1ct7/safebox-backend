@@ -117,6 +117,9 @@ domain::Result<std::optional<EntryId>> PathFolders::resolve(const std::vector<st
                 return std::unexpected(made.error());
             }
             folder = *made;
+            if (uow != nullptr) {
+                created_.push_back(folder);
+            }
             siblings.add(foldedDir, {folder, true});
         }
         folders_.emplace(key, folder);
@@ -138,7 +141,7 @@ domain::Result<EntryId> PathFolders::createFolderCommitted(std::optional<EntryId
     if (auto st = (*uow)->commit(); !st) {
         return std::unexpected(st.error());
     }
-    session_.invalidateCatalog();
+    session_.catalogChanged({.entries = {*id}});
     return id;
 }
 
