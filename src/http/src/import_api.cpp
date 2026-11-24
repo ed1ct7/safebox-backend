@@ -30,7 +30,8 @@ using Manifest = std::unordered_map<std::string, app::ImportFileOptions>; // п�
     return true;
 }
 
-// {"files": {"<путь>": {"lastModified"?: мс, "onConflict"?: "keepBoth"|"replace"|"skip"}}};
+// {"files": {"<путь>": {"lastModified"?: мс, "onConflict"?: "keepBoth"|"replace"|"skip",
+//                       "onDuplicate"?: "skip"|"import"}}};
 // nullopt - тело не такое.
 [[nodiscard]] std::optional<Manifest> parseManifest(std::string_view text) {
     const Json root = Json::parse(text, nullptr, /*allow_exceptions=*/false);
@@ -67,6 +68,16 @@ using Manifest = std::unordered_map<std::string, app::ImportFileOptions>; // п�
                 return std::nullopt;
             }
             options.onConflict = *policy;
+        }
+        if (const auto it = item.find("onDuplicate"); it != item.end() && !it->is_null()) {
+            const auto value = it->is_string() ? it->get<std::string>() : std::string{};
+            if (value == "skip") {
+                options.onDuplicate = app::DuplicatePolicy::Skip;
+            } else if (value == "import") {
+                options.onDuplicate = app::DuplicatePolicy::Import;
+            } else {
+                return std::nullopt;
+            }
         }
         manifest.emplace(path, options);
     }

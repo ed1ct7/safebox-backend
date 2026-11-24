@@ -5,6 +5,7 @@
 #include "vault_session.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <unordered_set>
 
 #include "safebox/domain/model/rules.hpp"
@@ -166,7 +167,49 @@ Catalog::NodePtr makeNode(domain::Entry entry) {
 
 void Catalog::add(domain::Entry entry) {
     const auto id = entry.id;
-    nodes_.insert_or_assign(id, makeNode(std::move(entry)));
+    if (const auto old = nodes_.find(id); old != nodes_.end()) {
+        unindex(*old->second);
+    }
+    auto node = makeNode(std::move(entry));
+    index(*node);
+    nodes_.insert_or_assign(id, std::move(node));
+}
+
+std::size_t Sha256Hash::operator()(const domain::Sha256& hash) const noexcept {
+    std::size_t value = 0; // хеш и так равномерный: берем первые байты
+    std::memcpy(&value, hash.data(), sizeof value);
+    return value;
+}
+
+void Catalog::index(const Node& node) {
+    if (const auto& hash = node.entry.meta.sha256) {
+        bySha256_.emplace(*hash, node.entry.id);
+    }
+}
+
+void Catalog::unindex(const Node& node) {
+    const auto& hash = node.entry.meta.sha256;
+    if (!hash) {
+        return;
+    }
+    auto [it, end] = bySha256_.equal_range(*hash);
+    for (; it != end; ++it) {
+        if (it->second == node.entry.id) {
+            bySha256_.erase(it);
+            return;
+        }
+    }
+}
+
+const Catalog::Node* Catalog::findBySha256(const domain::Sha256& hash) const {
+    const Node* best = nullptr;
+    auto [it, end] = bySha256_.equal_range(hash);
+    for (; it != end; ++it) {
+        if (best == nullptr || it->second < best->entry.id) {
+            best = find(it->second);
+        }
+    }
+    return best;
 }
 
 void Catalog::addCategory(domain::TagCategory category) {
@@ -281,7 +324,10 @@ void Catalog::erase(std::span<const EntryId> ids, const std::unordered_set<Entry
                 }
                 children_.erase(it);
             }
-            nodes_.erase(current);
+            if (const auto node = nodes_.find(current); node != nodes_.end()) {
+                unindex(*node->second);
+                nodes_.erase(node);
+            }
         }
     }
 }
@@ -300,7 +346,7 @@ bool Catalog::upsert(std::vector<domain::Entry> entries) {
     for (auto& entry : entries) {
         const auto id = entry.id;
         ids.push_back(id);
-        nodes_.insert_or_assign(id, makeNode(std::move(entry)));
+        add(std::move(entry));
     }
     for (const auto id : ids) {
         const auto& parent = nodes_.at(id)->entry.parentId;

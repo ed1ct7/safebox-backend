@@ -12,6 +12,7 @@ namespace safebox::domain {
 inline constexpr std::uint32_t kThumbnailMaxSide = 400;             // px, большая сторона
 inline constexpr std::uint64_t kThumbnailSourceLimit = 64ull << 20; // фото крупнее - без миниатюры
 
+// make вызывается из нескольких потоков сразу (миниатюры пачки импорта).
 class Thumbnailer {
 public:
     virtual ~Thumbnailer() = default;

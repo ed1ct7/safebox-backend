@@ -39,6 +39,11 @@ namespace safebox::app {
                                      const std::unordered_set<std::string>& taken,
                                      int* resume = nullptr);
 
+// Ключ хеш-таблиц по sha256 содержимого.
+struct Sha256Hash {
+    [[nodiscard]] std::size_t operator()(const domain::Sha256& hash) const noexcept;
+};
+
 class Catalog {
 public:
     // Узел не меняется после создания и делится между копиями каталога (clone): правка записи
@@ -93,6 +98,8 @@ public:
         return nodes_;
     }
     [[nodiscard]] std::size_t childCount(domain::EntryId id) const; // прямых детей
+    // Запись с таким содержимым (с меньшим id, если их несколько); nullptr - нет.
+    [[nodiscard]] const Node* findBySha256(const domain::Sha256& hash) const;
 
     // Теги с inherit у предков (устойчиво к циклам): ближайший предок побеждает, теги, уже
     // прямые у самой записи, не повторяются. По возрастанию tagId.
@@ -123,12 +130,15 @@ private:
     [[nodiscard]] std::vector<domain::EntryId>* placeOf(const Node& node, bool create);
     void unlink(domain::EntryId id); // из списка по текущему узлу; нет там - ничего
     void wipeTags() noexcept;
+    void index(const Node& node);   // в bySha256_, если хеш известен
+    void unindex(const Node& node); // из bySha256_
 
     std::unordered_map<domain::EntryId, NodePtr> nodes_;
     std::unordered_map<domain::CategoryId, CategoryNode> categories_;
     std::unordered_map<domain::TagId, TagNode> tags_;
     std::unordered_map<domain::EntryId, std::vector<domain::EntryId>> children_;
     std::vector<domain::EntryId> roots_;
+    std::unordered_multimap<domain::Sha256, domain::EntryId, Sha256Hash> bySha256_;
     bool hasCycles_ = false; // в файле цикл parent_id: правки только полной перестройкой
 };
 

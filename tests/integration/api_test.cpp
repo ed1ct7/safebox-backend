@@ -750,7 +750,9 @@ TEST_CASE("re-importing a folder over HTTP: plan, then a manifest with the decis
                                               {"replaced", 0},
                                               {"skipped", 0},
                                               {"failed", 0},
-                                              {"failures", Json::array()}}));
+                                              {"failures", Json::array()},
+                                              {"duplicates", 0},
+                                              {"duplicateFiles", Json::array()}}));
     CHECK(listing(pictId)["entries"].size() == 3);
     CHECK(contentOf(byName(listing(pictId), "a.txt")) == "AAA");
 
@@ -780,7 +782,7 @@ TEST_CASE("re-importing a folder over HTTP: plan, then a manifest with the decis
     CHECK(result["replaced"] == 1);
     CHECK(result["skipped"] == 0);
     const auto after = listing(pictId);
-    CHECK(after["entries"].size() == 4);
+    CHECK(after["entries"].size() == 4); // до повторов ниже
     const auto aAfter = byName(after, "a.txt");
     CHECK(aAfter["id"] == aBefore["id"]);
     CHECK(aAfter["sourceModifiedAt"] == 1'800'000'000'000);
@@ -789,6 +791,21 @@ TEST_CASE("re-importing a folder over HTTP: plan, then a manifest with the decis
     CHECK(contentOf(byName(after, "b.txt")) == "BBB");
     CHECK(contentOf(byName(after, "b (2).txt")) == "BBB-копия");
     CHECK(byName(after, "b (2).txt")["sourceModifiedAt"].is_null());
+
+    // то же содержимое под другим именем не пишется: ответ говорит, где оно уже лежит
+    auto repeat = upload("", {{"file", "AAA-новый", "pict/a-copy.txt", "text/plain"}});
+    REQUIRE(repeat->status == 200);
+    const auto repeated = Json::parse(repeat->body);
+    CHECK(repeated["imported"] == 0);
+    CHECK(repeated["duplicates"] == 1);
+    CHECK(repeated["duplicateFiles"] ==
+          Json::array({Json{{"path", "pict/a-copy.txt"}, {"existingId", aAfter["id"]}}}));
+    CHECK(listing(pictId)["entries"].size() == 4);
+    auto forced = upload(manifestOf({{"pict/a-copy.txt", {{"onDuplicate", "import"}}}}),
+                         {{"file", "AAA-новый", "pict/a-copy.txt", "text/plain"}});
+    REQUIRE(forced->status == 200);
+    CHECK(Json::parse(forced->body)["imported"] == 1);
+    CHECK(listing(pictId)["entries"].size() == 5);
 
     // импорт во вложения файла: имена сверяются у него
     const auto aId = aAfter["id"].get<std::int64_t>();

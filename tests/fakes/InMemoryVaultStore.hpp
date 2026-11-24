@@ -304,6 +304,35 @@ private:
         }
 
         // BlobRepository
+        domain::Result<domain::BlobId> create() override {
+            const auto id = work_.nextBlob++;
+            work_.blobs[id] = Blob{};
+            return id;
+        }
+
+        domain::Status append(domain::BlobId id, std::uint32_t index,
+                              std::span<const std::byte> sealedChunk) override {
+            const auto it = work_.blobs.find(id);
+            if (it == work_.blobs.end() || it->second.status != domain::BlobStatus::Pending ||
+                index != it->second.chunks.size()) {
+                return domain::fail(domain::Error::Code::IntegrityError, "blob gone");
+            }
+            it->second.chunks.push_back(
+                std::make_shared<const domain::Bytes>(sealedChunk.begin(), sealedChunk.end()));
+            return {};
+        }
+
+        domain::Status finish(domain::BlobId id, std::uint64_t plainSize,
+                              std::uint32_t chunkCount) override {
+            const auto it = work_.blobs.find(id);
+            if (it == work_.blobs.end() || it->second.status != domain::BlobStatus::Pending) {
+                return domain::fail(domain::Error::Code::NotFound, "blob gone");
+            }
+            it->second.size = plainSize;
+            it->second.chunkCount = chunkCount;
+            return {};
+        }
+
         domain::Status promote(domain::BlobId id) override {
             const auto it = work_.blobs.find(id);
             if (it == work_.blobs.end() || it->second.status != domain::BlobStatus::Pending) {

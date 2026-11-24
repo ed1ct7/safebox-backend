@@ -82,6 +82,16 @@ void Siblings::add(std::string folded, Occupant occupant) {
     byName_.try_emplace(std::move(folded), occupant);
 }
 
+void Siblings::settle(const std::string& folded, EntryId id) {
+    if (const auto it = byName_.find(folded); it != byName_.end()) {
+        if (it->second.id == 0) {
+            it->second.id = id;
+        }
+        return;
+    }
+    add(folded, Occupant{id, false});
+}
+
 // PathFolders
 
 PathFolders::PathFolders(Ports ports, VaultSession& session, std::shared_ptr<const Sealer> sealer,

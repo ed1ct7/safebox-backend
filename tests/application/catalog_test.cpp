@@ -370,6 +370,38 @@ TEST_CASE("clone shares nodes; edits stay in the copy", "[catalog][patch]") {
     CHECK(copy->nodes().empty());
 }
 
+TEST_CASE("content hash index follows adds, upserts, erases and clones", "[catalog][sha256]") {
+    const domain::Sha256 one{std::byte{1}};
+    const domain::Sha256 two{std::byte{2}};
+    Model model;
+    model[1] = entry(1, std::nullopt, domain::Kind::Folder, "папка");
+    model[2] = entry(2, 1, domain::Kind::File, "a.jpg");
+    model[2].meta.sha256 = one;
+    model[3] = entry(3, 1, domain::Kind::File, "b.jpg");
+    model[3].meta.sha256 = one;
+    model[4] = entry(4, 1, domain::Kind::File, "без хеша.txt");
+    auto catalog = rebuilt(model);
+    REQUIRE(catalog->findBySha256(one) != nullptr);
+    CHECK(catalog->findBySha256(one)->entry.id == 2); // из одинаковых - меньший id
+    CHECK(catalog->findBySha256(two) == nullptr);
+
+    auto changed = model[2];
+    changed.meta.sha256 = two; // содержимое заменили
+    REQUIRE(catalog->upsert({changed}));
+    CHECK(catalog->findBySha256(one)->entry.id == 3);
+    CHECK(catalog->findBySha256(two)->entry.id == 2);
+
+    auto copy = catalog->clone();
+    const std::vector<domain::EntryId> gone{1};
+    copy->erase(gone, {});
+    CHECK(copy->findBySha256(one) == nullptr);
+    CHECK(copy->findBySha256(two) == nullptr);
+    CHECK(catalog->findBySha256(two)->entry.id == 2); // оригинал не тронут
+
+    catalog->add(entry(2, 1, domain::Kind::File, "a.jpg")); // перезапись узла без хеша
+    CHECK(catalog->findBySha256(two) == nullptr);
+}
+
 TEST_CASE("replaceTags swaps all categories and tags", "[catalog][patch]") {
     Catalog catalog;
     catalog.addCategory({.id = 1, .name = "Люди"});

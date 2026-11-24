@@ -496,6 +496,11 @@ TEST_CASE("InMemoryVaultStore behaves like the sqlite store", "[store][fake]") {
         REQUIRE(store.create(path, domain::SafeMeta{}).has_value());
         checkBlobRemove(store);
     }
+    SECTION("blob inside a transaction") {
+        InMemoryVaultStore store;
+        REQUIRE(store.create(path, domain::SafeMeta{}).has_value());
+        checkBlobInTransaction(store);
+    }
     SECTION("tag repository") {
         InMemoryVaultStore store;
         REQUIRE(store.create(path, domain::SafeMeta{}).has_value());

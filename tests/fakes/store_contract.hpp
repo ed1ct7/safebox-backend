@@ -125,6 +125,47 @@ inline void checkBlobRemove(domain::VaultStore& store) {
     CHECK(store.blobs().info(pending).error().code == Code::NotFound);
 }
 
+// Блоб целиком внутри транзакции (импорт пачкой): виден только после коммита.
+inline void checkBlobInTransaction(domain::VaultStore& store) {
+    using Code = domain::Error::Code;
+    const domain::Bytes a(7, std::byte{1});
+    const domain::Bytes b(3, std::byte{2});
+    domain::BlobId id = 0;
+    {
+        auto uow = store.begin();
+        REQUIRE(uow.has_value());
+        auto created = (*uow)->blobs().create();
+        REQUIRE(created.has_value());
+        id = *created;
+        REQUIRE((*uow)->blobs().append(id, 0, a).has_value());
+        REQUIRE((*uow)->blobs().append(id, 1, b).has_value());
+        REQUIRE((*uow)->blobs().finish(id, 10, 2).has_value());
+        REQUIRE((*uow)->blobs().promote(id).has_value());
+        auto missing = (*uow)->blobs().finish(424242, 1, 1);
+        REQUIRE_FALSE(missing.has_value());
+        CHECK(missing.error().code == Code::NotFound);
+        REQUIRE((*uow)->commit().has_value());
+    }
+    auto info = store.blobs().info(id);
+    REQUIRE(info.has_value());
+    CHECK(info->status == domain::BlobStatus::Ready);
+    CHECK(info->size == 10);
+    CHECK(info->chunkCount == 2);
+    CHECK(store.blobs().readChunk(id, 0).value() == a);
+    CHECK(store.blobs().readChunk(id, 1).value() == b);
+
+    // без коммита не остается ничего, даже pending
+    domain::BlobId rolledBack = 0;
+    {
+        auto uow = store.begin();
+        REQUIRE(uow.has_value());
+        rolledBack = (*uow)->blobs().create().value();
+        REQUIRE((*uow)->blobs().append(rolledBack, 0, a).has_value());
+    }
+    CHECK(store.blobs().info(rolledBack).error().code == Code::NotFound);
+    CHECK(store.blobs().gcPending().value() == 0);
+}
+
 inline void checkTagRepository(domain::VaultStore& store) {
     using Code = domain::Error::Code;
     domain::CategoryId cat1 = 0;

@@ -18,6 +18,12 @@ constexpr app::ImportFileOptions kReplace{.onConflict = ConflictPolicy::Replace}
 
 using Names = std::vector<std::string>;
 
+domain::Sha256 sha256Of(AppFixture& f, std::string_view data) {
+    auto hasher = f.crypto->sha256();
+    hasher->update(domain::asBytes(data));
+    return hasher->finish();
+}
+
 domain::BlobId blobOf(const domain::Entry& e) {
     REQUIRE(e.meta.blobId.has_value());
     return *e.meta.blobId;
@@ -415,7 +421,7 @@ TEST_CASE("replace keeps the record and swaps only the content", "[import][UF-15
     CHECK(after.meta.source == "telegram");
     CHECK(after.meta.sourceUrl == "https://t.me/c/1/2");
     CHECK(after.meta.sourceDate == 1'700'000'000'000);
-    CHECK_FALSE(after.meta.sha256); // описывали прежнее содержимое
+    CHECK(after.meta.sha256 == sha256Of(f, data)); // уже нового содержимого
     CHECK_FALSE(after.meta.dimensions);
     CHECK_FALSE(after.meta.durationMs);
 
@@ -617,6 +623,107 @@ TEST_CASE("planImport reports the name clashes and creates nothing", "[import][p
     }
 }
 
+TEST_CASE("a repeated content is not written again", "[import][dedup]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    const auto photo = fakeJpeg(700, 1);
+    const auto big = randomBytes(5000, 3); // больше куска: пишется потоком
+    auto first = f.importFiles(s, {{"a.jpg", photo}, {"big.bin", big}});
+    REQUIRE(first.imported == 2);
+    const auto a = f.entryNamed(s, "a.jpg");
+    const auto bigEntry = f.entryNamed(s, "big.bin");
+    CHECK(a.meta.sha256 == sha256Of(f, photo));
+    CHECK(bigEntry.meta.sha256 == sha256Of(f, big));
+    const auto blobs = f.store.blobCount(f.safePath());
+
+    SECTION("already in the safe") {
+        const auto r = f.importFiles(s, {{"copy/a again.jpg", photo}, {"b.bin", big}});
+        CHECK(r.imported == 0);
+        REQUIRE(r.duplicates.size() == 2);
+        CHECK(r.duplicates[0].path == "copy/a again.jpg");
+        CHECK(r.duplicates[0].existing == a.id);
+        CHECK(r.duplicates[1].path == "b.bin");
+        CHECK(r.duplicates[1].existing == bigEntry.id);
+        CHECK(f.store.blobCount(f.safePath()) == blobs);
+        CHECK(namesIn(f, s, std::nullopt) == Names{"a.jpg", "big.bin", "copy"});
+    }
+    SECTION("twice in one request") {
+        const auto c = randomBytes(300, 4);
+        const auto r = f.importFiles(s, {{"c.txt", c}, {"d.txt", c}, {"e.txt", c}});
+        CHECK(r.imported == 1);
+        REQUIRE(r.duplicates.size() == 2);
+        const auto stored = f.entryNamed(s, "c.txt");
+        CHECK(r.duplicates[0].existing == stored.id);
+        CHECK(r.duplicates[1].existing == stored.id);
+    }
+    SECTION("import anyway") {
+        const app::ImportFileOptions again{.onDuplicate = app::DuplicatePolicy::Import};
+        const auto r = f.importFiles(s, {{"a.jpg", photo, again}});
+        CHECK(r.imported == 1);
+        CHECK(r.duplicates.empty());
+        CHECK(namesIn(f, s, std::nullopt) == Names{"a (2).jpg", "a.jpg", "big.bin"});
+        CHECK(f.entryNamed(s, "a (2).jpg").meta.sha256 == a.meta.sha256);
+        CHECK(f.entryNamed(s, "a (2).jpg").hasThumbnail());
+    }
+    SECTION("replace with the same content changes nothing") {
+        const auto r = f.importFiles(s, {{"a.jpg", photo, kReplace}});
+        CHECK(r.replaced == 0);
+        REQUIRE(r.duplicates.size() == 1);
+        CHECK(blobOf(f.entryNamed(s, "a.jpg")) == blobOf(a));
+    }
+    SECTION("content replaced earlier in the request is no longer a repeat") {
+        const auto r =
+            f.importFiles(s, {{"a.jpg", fakeJpeg(800, 2), kReplace}, {"old a.jpg", photo}});
+        CHECK(r.replaced == 1);
+        CHECK(r.imported == 1);
+        CHECK(r.duplicates.empty());
+        CHECK(f.readContent(s, f.entryNamed(s, "old a.jpg").id) == photo);
+    }
+    CHECK(f.store.pendingBlobs(f.safePath()) == 0);
+}
+
+TEST_CASE("many small files are written in batches", "[import][batch]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    std::vector<ImportFile> files;
+    for (int i = 0; i < 600; ++i) { // больше двух пачек по числу файлов
+        const auto name = "p" + std::to_string(1000 + i);
+        files.push_back({"photos/" + name + ".jpg", fakeJpeg(200 + i, i)});
+    }
+    files.push_back({"photos/big.bin", randomBytes(3000, 9)}); // поток посреди пачки
+    const auto r = f.importFiles(s, files);
+    CHECK(r.imported == 601);
+    CHECK(r.failed == 0);
+    const auto photos = f.entryNamed(s, "photos");
+    auto listing = f.services.entries->list(f.lease(s), photos.id);
+    REQUIRE(listing.has_value());
+    REQUIRE(listing->entries.size() == 601);
+    for (const auto i : {0, 255, 256, 599}) {
+        const auto e = f.entryNamed(s, "p" + std::to_string(1000 + i) + ".jpg", photos.id);
+        CHECK(e.meta.kind == domain::Kind::Photo);
+        CHECK(e.hasThumbnail());
+        CHECK(f.readContent(s, e.id) == files[static_cast<std::size_t>(i)].data);
+    }
+    CHECK(f.thumbnailer.calls == 600);
+    CHECK(f.store.pendingBlobs(f.safePath()) == 0);
+}
+
+TEST_CASE("a broken request keeps the files received in full", "[import][batch]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    {
+        auto import = f.services.importExport->beginImport(f.lease(s), std::nullopt);
+        REQUIRE(import.has_value());
+        REQUIRE((*import)->beginFile("whole.txt", {}).has_value());
+        REQUIRE((*import)->write(domain::asBytes("received")).has_value());
+        REQUIRE((*import)->endFile().has_value());
+        REQUIRE((*import)->beginFile("cut.txt", {}).has_value());
+        REQUIRE((*import)->write(domain::asBytes("half")).has_value());
+    } // соединение оборвалось: finish не вызван
+    CHECK(namesIn(f, s, std::nullopt) == Names{"whole.txt"});
+    CHECK(f.store.pendingBlobs(f.safePath()) == 0);
+}
+
 TEST_CASE("the plan and the import agree about what clashes", "[import][plan][UF-15]") {
     AppFixture f;
     auto s = f.createSafe();
@@ -630,7 +737,7 @@ TEST_CASE("the plan and the import agree about what clashes", "[import][plan][UF
     std::vector<ImportFile> batch;
     for (const auto& path : paths) {
         planned.push_back({path, 1});
-        batch.push_back({path, "x", kSkip});
+        batch.push_back({path, path, kSkip}); // разное содержимое: повторы тут не при чем
     }
     auto plan = f.services.importExport->planImport(f.lease(s), std::nullopt, planned);
     REQUIRE(plan.has_value());

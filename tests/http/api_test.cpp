@@ -917,7 +917,8 @@ TEST_CASE("import applies the manifest to the files it names", "[http][import][m
     HttpFixture f;
     const std::string manifest =
         R"({"files":{"Папка/a.txt":{"lastModified":1700000000123,"onConflict":"replace"},)"
-        R"("b.bin":{"onConflict":"skip"},"d.txt":{"lastModified":1700000000000.9},)"
+        R"("b.bin":{"onConflict":"skip","onDuplicate":"import"},)"
+        R"("d.txt":{"lastModified":1700000000000.9,"onDuplicate":"skip"},)"
         R"("e.txt":{"lastModified":null,"onConflict":null},"unused.txt":{}}})";
     auto ok = postImport(f, manifestPart(manifest) + filePart("Папка/a.txt", "AAA") +
                                 filePart("b.bin", "BBB") + filePart("c.txt", "CCC") +
@@ -932,6 +933,9 @@ TEST_CASE("import applies the manifest to the files it names", "[http][import][m
     CHECK(options.at("Папка/a.txt").onConflict == app::ConflictPolicy::Replace);
     CHECK_FALSE(options.at("b.bin").sourceModifiedAt.has_value());
     CHECK(options.at("b.bin").onConflict == app::ConflictPolicy::Skip);
+    CHECK(options.at("b.bin").onDuplicate == app::DuplicatePolicy::Import);
+    CHECK(options.at("d.txt").onDuplicate == app::DuplicatePolicy::Skip);
+    CHECK(options.at("c.txt").onDuplicate == app::DuplicatePolicy::Skip); // по умолчанию
     // файла нет в manifest: без даты и keepBoth
     CHECK_FALSE(options.at("c.txt").sourceModifiedAt.has_value());
     CHECK(options.at("c.txt").onConflict == app::ConflictPolicy::KeepBoth);
@@ -979,6 +983,8 @@ TEST_CASE("a bad manifest is refused before any file is imported", "[http][impor
         refused(manifestPart(R"({"files":{"a.txt":5}})") + file);
         refused(manifestPart(R"({"files":{"a.txt":{"onConflict":"overwrite"}}})") + file);
         refused(manifestPart(R"({"files":{"a.txt":{"onConflict":1}}})") + file);
+        refused(manifestPart(R"({"files":{"a.txt":{"onDuplicate":"keep"}}})") + file);
+        refused(manifestPart(R"({"files":{"a.txt":{"onDuplicate":true}}})") + file);
         refused(manifestPart(R"({"files":{"a.txt":{"lastModified":"yesterday"}}})") + file);
         refused(manifestPart(R"({"files":{"a.txt":{"lastModified":1e300}}})") + file);
         CHECK(f.fakes.importExport->imported.empty());

@@ -46,6 +46,9 @@ public:
     [[nodiscard]] const std::unordered_set<std::string>& taken() const noexcept { return taken_; }
 
     void add(std::string folded, Occupant occupant);
+    // Имя, занятое заранее с id 0 (файл ждет записи пачкой), получает настоящий id;
+    // незанятое - занимается.
+    void settle(const std::string& folded, domain::EntryId id);
 
 private:
     std::unordered_map<std::string, Occupant> byName_;

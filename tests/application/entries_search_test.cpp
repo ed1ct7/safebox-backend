@@ -172,7 +172,7 @@ TEST_CASE("search without limit returns every match", "[search][UF-8]") {
     // больше старого лимита по умолчанию (200)
     std::vector<ImportFile> files;
     for (int i = 0; i < 250; ++i) {
-        files.push_back({.path = "bulk" + std::to_string(i) + ".txt", .data = "d"});
+        files.push_back({.path = "bulk" + std::to_string(i) + ".txt", .data = std::to_string(i)});
     }
     REQUIRE(f.importFiles(s, files).imported == 250);
 

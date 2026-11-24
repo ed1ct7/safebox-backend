@@ -270,9 +270,18 @@ Json toJson(const domain::ImportResult& result) {
     for (const auto& f : result.failures) {
         failures.push_back(Json{{"path", f.path}, {"message", f.message}});
     }
+    Json duplicates = Json::array();
+    for (const auto& d : result.duplicates) {
+        duplicates.push_back(Json{{"path", d.path}, {"existingId", d.existing}});
+    }
     return Json{
-        {"imported", result.imported}, {"replaced", result.replaced},     {"failed", result.failed},
-        {"skipped", result.skipped},   {"failures", std::move(failures)},
+        {"imported", result.imported},
+        {"replaced", result.replaced},
+        {"failed", result.failed},
+        {"skipped", result.skipped},
+        {"failures", std::move(failures)},
+        {"duplicates", result.duplicates.size()},
+        {"duplicateFiles", std::move(duplicates)},
     };
 }
 

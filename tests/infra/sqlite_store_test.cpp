@@ -303,6 +303,9 @@ TEST_CASE("sqlite store passes the shared storage contract", "[sqlite][contract]
     SECTION("blob remove") {
         checkBlobRemove(*store);
     }
+    SECTION("blob inside a transaction") {
+        checkBlobInTransaction(*store);
+    }
     SECTION("tag repository") {
         checkTagRepository(*store);
     }

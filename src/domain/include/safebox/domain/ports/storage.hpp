@@ -82,6 +82,13 @@ class BlobRepository {
 public:
     virtual ~BlobRepository() = default;
 
+    // Блоб целиком внутри транзакции (импорт пачкой): pending-строка, куски по порядку с нуля,
+    // размер и число кусков; дальше promote. Как BlobWriter, но без своих транзакций.
+    [[nodiscard]] virtual Result<BlobId> create() = 0;
+    [[nodiscard]] virtual Status append(BlobId id, std::uint32_t index,
+                                        std::span<const std::byte> sealedChunk) = 0;
+    [[nodiscard]] virtual Status finish(BlobId id, std::uint64_t plainSize,
+                                        std::uint32_t chunkCount) = 0;
     // pending -> ready; блоб должен существовать и быть pending.
     [[nodiscard]] virtual Status promote(BlobId id) = 0;
     // Блоб и его куски (ready или pending); нет такого - не ошибка. На блоб не должна

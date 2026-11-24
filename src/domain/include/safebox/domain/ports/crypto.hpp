@@ -9,10 +9,20 @@
 #include <string_view>
 
 #include "safebox/domain/io.hpp"
+#include "safebox/domain/model/entry.hpp"
 #include "safebox/domain/model/error.hpp"
 #include "safebox/domain/model/safe_format.hpp"
 
 namespace safebox::domain {
+
+// Потоковый SHA-256 открытого содержимого (поиск повторов при импорте).
+class Sha256Hasher {
+public:
+    virtual ~Sha256Hasher() = default;
+
+    virtual void update(std::span<const std::byte> data) noexcept = 0;
+    [[nodiscard]] virtual Sha256 finish() noexcept = 0; // после него update не вызывается
+};
 
 class SecretKey {
 public:
@@ -63,6 +73,8 @@ public:
     [[nodiscard]] virtual std::string generateToken() = 0;
 
     [[nodiscard]] virtual bool equalConstantTime(std::string_view a, std::string_view b) = 0;
+
+    [[nodiscard]] virtual std::unique_ptr<Sha256Hasher> sha256() = 0;
 };
 
 } // namespace safebox::domain

@@ -1,8 +1,13 @@
 // Импорт и экспорт.
-// Импорт: файл пишется кусками в pending-блоб, в конце одной транзакцией создается
-// запись + promote. Какой кусок последний, узнаем только когда кончился поток,
-// поэтому полный кусок держим до прихода следующих байтов.
-// Если упал один файл - удаляем только его pending, остальные импортируются дальше.
+// Импорт: файл до размера куска копится в памяти и пишется пачкой (до 256 файлов / 64 МиБ):
+// миниатюры пачки строятся параллельно, блобы и записи всей пачки - одна транзакция
+// (fsync на пачку, а не на каждый блоб). Больший файл пишется кусками в pending-блоб,
+// в конце своей транзакцией создается запись + promote. Какой кусок последний, узнаем
+// только когда кончился поток, поэтому полный кусок держим до прихода следующих байтов.
+// Если упал один большой файл - удаляем только его pending; упала транзакция пачки - в
+// failures все ее файлы. Остальные импортируются дальше.
+// Повтор содержимого (sha256 открытых байтов совпал с записью каталога или с файлом раньше в
+// этом импорте): по умолчанию не пишется, попадает в duplicates; onDuplicate=Import - пишется.
 // Имя файла занято (у родителя: снимок каталога плюс созданное этим импортом, без учета
 // регистра): Skip - файл не пишется вообще, KeepBoth - "имя (2).ext", Replace - файл пишется
 // в новый блоб, а в конце у существующей записи меняются блобы и мета (id, имя, описание,
@@ -11,7 +16,9 @@
 // Чтение: расшифровываем только нужные куски, последний кешируем. Размер и число
 // кусков сверяем с метой записи, не сошлось -> IntegrityError
 #include <algorithm>
+#include <atomic>
 #include <map>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -221,13 +228,33 @@ constexpr std::string_view kAttachmentsSuffix = " (вложения)";
 
 // импорт
 
+constexpr std::size_t kBatchFiles = 256;           // файлов в одной транзакции
+constexpr std::uint64_t kBatchBytes = 64ull << 20; // открытых байтов в памяти на пачку
+constexpr unsigned kMaxThumbnailThreads = 8;
+constexpr std::size_t kMinBufferCapacity = 64u << 10;
+
+// Дописать в буфер; при росте старая память затирается (в ней открытое содержимое).
+void appendWiping(Bytes& buffer, std::span<const std::byte> data, std::size_t limit) {
+    const auto needed = buffer.size() + data.size();
+    if (needed > buffer.capacity()) {
+        const auto capacity =
+            std::min(std::max({buffer.capacity() * 2, needed, kMinBufferCapacity}), limit);
+        Bytes grown;
+        grown.reserve(std::max(capacity, needed));
+        grown.assign(buffer.begin(), buffer.end());
+        domain::secureWipe(buffer);
+        buffer = std::move(grown);
+    }
+    buffer.insert(buffer.end(), data.begin(), data.end());
+}
+
 class ImportSessionImpl final : public ImportSession {
 public:
     ImportSessionImpl(Lease lease, Ports ports, VaultSession& session,
                       std::shared_ptr<const Sealer> sealer, std::optional<EntryId> root,
                       VaultSession::CatalogPtr snapshot)
         : lease_(std::move(lease)), ports_(ports), session_(session), sealer_(sealer),
-          paths_(ports, session, std::move(sealer), root, std::move(snapshot)),
+          snapshot_(snapshot), paths_(ports, session, std::move(sealer), root, std::move(snapshot)),
           chunkSize_(session.chunkSize()) {}
 
     ~ImportSessionImpl() override {
@@ -235,6 +262,14 @@ public:
             discardCurrent();
             wipeCurrent();
         }
+        // Принятые целиком файлы сохраняются и при оборванном запросе или блокировке: аренда
+        // еще держится, lock ждет ее (пачка - доли секунды).
+        try {
+            (void)flushBatch();
+        } catch (...) {
+            wipeBatch();
+        }
+        domain::secureWipe(buffer_);
     }
 
     Status beginFile(std::string_view relativePath, const ImportFileOptions& options) override {
@@ -248,7 +283,8 @@ public:
         }
         current_.emplace();
         auto& file = *current_;
-        file.sourceModifiedAt = options.sourceModifiedAt;
+        file.content.sourceModifiedAt = options.sourceModifiedAt;
+        file.onDuplicate = options.onDuplicate;
 
         auto split = splitPath(relativePath);
         file.path = std::move(split.clean);
@@ -256,25 +292,22 @@ public:
             failCurrent("Недопустимый путь файла");
             return {};
         }
-        file.name = std::move(split.name);
+        file.content.name = std::move(split.name);
 
         auto parent = paths_.resolve(split.dirs);
         if (!parent) {
             failCurrent(parent.error().message);
             return fatalOnly(parent.error());
         }
-        file.parent = *parent;
-        resolveName(file, options.onConflict);
+        file.content.parent = *parent;
+        if (auto st = resolveName(file, options.onConflict); !st) {
+            failCurrent(st.error().message);
+            return st;
+        }
         if (file.skipped) {
             return {}; // в хранилище не пишем ничего
         }
-        auto writer = ports_.store.blobs().create();
-        if (!writer) {
-            failCurrent(writer.error().message);
-            return fatalOnly(writer.error());
-        }
-        file.writer = std::move(*writer);
-        file.buffer.reserve(chunkSize_);
+        file.hasher = ports_.crypto.sha256();
         return {};
     }
 
@@ -286,11 +319,12 @@ public:
             return {}; // поле формы, отвергнутый или пропущенный файл - байты просто пропускаем
         }
         auto& file = *current_;
+        file.hasher->update(data);
         std::size_t offset = 0;
         while (offset < data.size()) {
-            if (file.buffer.size() == chunkSize_) {
-                // полный кусок и пришли еще байты -> он точно не последний
-                if (auto st = flush(false); !st) {
+            if (buffer_.size() == chunkSize_) {
+                // полный кусок и пришли еще байты -> он точно не последний, файл пишется потоком
+                if (auto st = flushChunk(false); !st) {
                     return st;
                 }
                 if (file.failed) {
@@ -298,10 +332,8 @@ public:
                 }
             }
             const auto take =
-                std::min<std::size_t>(chunkSize_ - file.buffer.size(), data.size() - offset);
-            file.buffer.insert(file.buffer.end(),
-                               data.begin() + static_cast<std::ptrdiff_t>(offset),
-                               data.begin() + static_cast<std::ptrdiff_t>(offset + take));
+                std::min<std::size_t>(chunkSize_ - buffer_.size(), data.size() - offset);
+            appendWiping(buffer_, data.subspan(offset, take), chunkSize_);
             offset += take;
         }
         return {};
@@ -311,23 +343,37 @@ public:
         if (!current_) {
             return {};
         }
+        auto& file = *current_;
         Status fatal;
-        if (!current_->failed && !current_->skipped) {
-            fatal = flush(true);
-            if (fatal && !current_->failed) {
-                fatal = complete();
+        bool queued = false;
+        if (!file.failed && !file.skipped) {
+            file.content.sha256 = file.hasher->finish();
+            fatal = checkDuplicate(file);
+            if (!fatal) {
+                failCurrent(fatal.error().message);
+            } else if (!file.duplicateOf) {
+                if (file.writer) { // большой файл: дописать последний кусок, запись сразу
+                    fatal = flushChunk(true);
+                    if (fatal && !file.failed) {
+                        fatal = complete();
+                    }
+                } else {
+                    queued = true;
+                    fatal = enqueue(file);
+                }
             }
         }
-        if (current_->failed) {
+        if (file.failed) {
             ++result_.failed;
-            result_.failures.push_back({current_->path, current_->error});
+            result_.failures.push_back({file.path, file.error});
             discardCurrent();
-        } else if (current_->skipped) {
+        } else if (file.duplicateOf) {
+            discardCurrent();
+            result_.duplicates.push_back({file.path, *file.duplicateOf});
+        } else if (file.skipped) {
             ++result_.skipped;
-        } else if (current_->replaces) {
-            ++result_.replaced;
-        } else {
-            ++result_.imported;
+        } else if (!queued) { // из пачки считаются после ее коммита
+            ++(file.content.replaces ? result_.replaced : result_.imported);
         }
         wipeCurrent();
         current_.reset();
@@ -338,6 +384,7 @@ public:
         if (current_) {
             (void)endFile();
         }
+        (void)flushBatch();
         if (result_.replaced > 0) {
             (void)ports_.store.compact(); // старые блобы освободили место в файле
         }
@@ -345,37 +392,64 @@ public:
     }
 
 private:
-    struct CurrentFile {
-        std::string path; // для отчета: очищенный относительный путь
+    // Что запишется в запись: определяется самим файлом.
+    struct Content {
         std::string name; // имя новой записи; у замены не используется, только тип по расширению
         std::optional<EntryId> parent;
         std::optional<EntryId> replaces; // Replace: запись, чей блоб и мета заменяются
         std::optional<std::int64_t> sourceModifiedAt;
-        std::unique_ptr<domain::BlobWriter> writer;
-        std::optional<BlobId> thumbBlob;
-        Bytes buffer;      // текущий кусок (<= chunkSize)
-        Bytes thumbSource; // фото целиком для миниатюры (<= kThumbnailSourceLimit)
-        bool collectThumb = false;
-        std::uint64_t size = 0;
-        std::uint32_t chunks = 0;
         Kind kind = Kind::File;
         std::string mime;
         std::string url;
+        std::uint64_t size = 0;
+        std::optional<domain::Sha256> sha256;
+        BlobId blob = 0;
+        std::optional<BlobId> thumb;
+    };
+
+    struct CurrentFile {
+        std::string path; // для отчета: очищенный относительный путь
+        Content content;
+        DuplicatePolicy onDuplicate = DuplicatePolicy::Skip;
+        std::unique_ptr<domain::Sha256Hasher> hasher;
+        std::unique_ptr<domain::BlobWriter> writer; // nullptr - файл пока целиком в buffer_
+        std::optional<BlobId> thumbBlob;
+        Bytes thumbSource; // большое фото целиком для миниатюры (<= kThumbnailSourceLimit)
+        bool collectThumb = false;
+        std::uint32_t chunks = 0;
+        std::optional<EntryId> duplicateOf; // такое содержимое уже есть: не пишется
         bool failed = false;
         bool committed = false;
         bool skipped = false;
         std::string error;
     };
 
+    // Небольшой файл, ждущий записи пачкой.
+    struct Queued {
+        std::string path;
+        Content content;
+        Bytes data;  // содержимое целиком
+        Bytes thumb; // готовая миниатюра (фото), пусто - заглушка
+        EntryId id = 0;
+    };
+
     // Имя занято -> по решению: пропуск, уникальное имя или запись поверх существующей.
-    // Существующая папка не заменяется: файл получает уникальное имя рядом.
-    void resolveName(CurrentFile& file, ConflictPolicy policy) {
-        const auto& siblings = paths_.siblingsOf(file.parent);
-        const auto* occupant = siblings.find(foldForSearch(file.name));
+    // Существующая папка не заменяется: файл получает уникальное имя рядом. Имя занял файл
+    // из пачки (id еще 0) -> для замены пачка пишется сейчас.
+    Status resolveName(CurrentFile& file, ConflictPolicy policy) {
+        auto& siblings = paths_.siblingsOf(file.content.parent);
+        const auto folded = foldForSearch(file.content.name);
+        const auto* occupant = siblings.find(folded);
         if (occupant == nullptr) {
-            return;
+            return {};
         }
-        if (policy == ConflictPolicy::Replace && occupant->isFolder) {
+        if (policy == ConflictPolicy::Replace && !occupant->isFolder && occupant->id == 0) {
+            if (auto st = flushBatch(); !st) {
+                return st;
+            }
+            occupant = siblings.find(folded);
+        }
+        if (policy == ConflictPolicy::Replace && (occupant->isFolder || occupant->id == 0)) {
             policy = ConflictPolicy::KeepBoth;
         }
         switch (policy) {
@@ -383,44 +457,230 @@ private:
             file.skipped = true;
             break;
         case ConflictPolicy::Replace:
-            file.replaces = occupant->id;
+            file.content.replaces = occupant->id;
             break;
         case ConflictPolicy::KeepBoth:
-            file.name = uniqueName(file.name, false, siblings.taken());
+            file.content.name = uniqueName(file.content.name, false, siblings.taken());
             break;
+        }
+        return {};
+    }
+
+    // Повтор содержимого: раньше в этом импорте (в том числе в пачке) или в каталоге.
+    Status checkDuplicate(CurrentFile& file) {
+        if (file.onDuplicate != DuplicatePolicy::Skip) {
+            return {};
+        }
+        const auto& hash = *file.content.sha256;
+        if (queuedSha_.contains(hash)) {
+            if (auto st = flushBatch(); !st) {
+                return st;
+            }
+        }
+        if (const auto it = seen_.find(hash); it != seen_.end()) {
+            file.duplicateOf = it->second;
+        } else if (const auto* node = snapshot_->findBySha256(hash);
+                   node != nullptr && !replaced_.contains(node->entry.id)) {
+            file.duplicateOf = node->entry.id; // замененная этим импортом уже о другом
+        }
+        return {};
+    }
+
+    // Тип файла по первым байтам и имени.
+    static void sniff(Content& content, std::span<const std::byte> data) {
+        const auto head = data.first(std::min(data.size(), domain::kSniffBytes));
+        const auto detected = domain::detectKind(head, content.name);
+        content.kind = detected.kind;
+        content.mime = std::string(detected.mime);
+        if (content.kind == Kind::Link) {
+            if (auto url = domain::shortcutUrl(head)) {
+                content.url = std::move(*url);
+            } else {
+                content.kind = Kind::File;
+            }
         }
     }
 
-    // Запечатать и записать текущий кусок; тип файла - по первому куску.
-    Status flush(bool last) {
-        auto& file = *current_;
-        if (file.chunks == 0) {
-            const auto head = std::span<const std::byte>(file.buffer)
-                                  .first(std::min(file.buffer.size(), domain::kSniffBytes));
-            const auto detected = domain::detectKind(head, file.name);
-            file.kind = detected.kind;
-            file.mime = std::string(detected.mime);
-            if (file.kind == Kind::Link) {
-                if (auto url = domain::shortcutUrl(head)) {
-                    file.url = std::move(*url);
-                } else {
-                    file.kind = Kind::File;
+    // Небольшой файл -> в пачку; имя занимается сразу (id 0 до коммита).
+    Status enqueue(CurrentFile& file) {
+        Queued item;
+        item.path = std::move(file.path);
+        item.content = std::move(file.content);
+        sniff(item.content, buffer_);
+        item.data.assign(buffer_.begin(), buffer_.end());
+        domain::secureWipe(buffer_);
+        item.content.size = item.data.size();
+        if (item.content.replaces) {
+            replaced_.insert(*item.content.replaces); // старое содержимое уже не повтор
+        } else {
+            paths_.siblingsOf(item.content.parent)
+                .add(foldForSearch(item.content.name), {0, false});
+        }
+        queuedSha_.insert(*item.content.sha256);
+        queuedBytes_ += item.content.size;
+        batch_.push_back(std::move(item));
+        if (batch_.size() >= kBatchFiles || queuedBytes_ >= kBatchBytes) {
+            return flushBatch();
+        }
+        return {};
+    }
+
+    // Пачка: миниатюры параллельно, затем все блобы и записи одной транзакцией. Ошибка ->
+    // не записан ни один файл пачки, каждый в failures. Отмену lock'ом не проверяет: файлы
+    // приняты целиком, а аренда держится до конца записи.
+    Status flushBatch() {
+        if (batch_.empty()) {
+            return {};
+        }
+        makeThumbnails();
+        Status fatal;
+        if (auto st = writeBatch(); !st) {
+            for (const auto& item : batch_) {
+                ++result_.failed;
+                result_.failures.push_back({item.path, st.error().message});
+            }
+            fatal = fatalOnly(st.error());
+        } else {
+            std::vector<EntryId> ids;
+            ids.reserve(batch_.size());
+            for (const auto& item : batch_) {
+                ids.push_back(item.id);
+                noteCommitted(item.content, item.id);
+                ++(item.content.replaces ? result_.replaced : result_.imported);
+            }
+            session_.catalogChanged({.entries = std::move(ids)});
+        }
+        wipeBatch();
+        return fatal;
+    }
+
+    void makeThumbnails() {
+        std::vector<Queued*> photos;
+        for (auto& item : batch_) {
+            if (item.content.kind == Kind::Photo && !item.data.empty()) {
+                photos.push_back(&item);
+            }
+        }
+        std::atomic<std::size_t> next{0};
+        const auto work = [&]() noexcept {
+            for (auto i = next++; i < photos.size(); i = next++) {
+                try {
+                    auto thumb = ports_.thumbnailer.make(photos[i]->data);
+                    if (thumb) {
+                        photos[i]->thumb = std::move(*thumb); // пусто - заглушка, не ошибка
+                    }
+                } catch (...) {
+                    // без миниатюры
                 }
             }
-            file.collectThumb = file.kind == Kind::Photo;
+        };
+        const auto threads =
+            std::min<std::size_t>(photos.size(), std::clamp(std::thread::hardware_concurrency(), 1u,
+                                                            kMaxThumbnailThreads));
+        std::vector<std::jthread> pool;
+        for (std::size_t i = 1; i < threads; ++i) {
+            try {
+                pool.emplace_back(work);
+            } catch (...) {
+                break; // поток не создался - справятся остальные
+            }
+        }
+        work();
+    } // pool ждет потоки
+
+    Status writeBatch() {
+        auto uow = ports_.store.begin();
+        if (!uow) {
+            return std::unexpected(uow.error());
+        }
+        const auto now = domain::toUnixMillis(ports_.clock.now());
+        for (auto& item : batch_) {
+            auto blob = storeBlob(**uow, KeyPurpose::Content, item.data);
+            if (!blob) {
+                return std::unexpected(blob.error());
+            }
+            item.content.blob = *blob;
+            if (!item.thumb.empty()) {
+                auto thumb = storeBlob(**uow, KeyPurpose::Thumbnails, item.thumb);
+                if (!thumb) {
+                    return std::unexpected(thumb.error());
+                }
+                item.content.thumb = *thumb;
+            }
+            auto id = item.content.replaces ? replaceEntry(**uow, now, item.content)
+                                            : insertEntry(**uow, now, item.content);
+            if (!id) {
+                return std::unexpected(id.error());
+            }
+            item.id = *id;
+        }
+        return (*uow)->commit();
+    }
+
+    // Блоб целиком внутри транзакции, сразу ready.
+    Result<BlobId> storeBlob(domain::UnitOfWork& uow, KeyPurpose purpose,
+                             std::span<const std::byte> data) {
+        auto& blobs = uow.blobs();
+        auto id = blobs.create();
+        if (!id) {
+            return std::unexpected(id.error());
+        }
+        const auto count = domain::chunkCountFor(data.size(), chunkSize_);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const auto from = std::size_t{i} * chunkSize_;
+            const auto part =
+                data.subspan(from, std::min<std::size_t>(chunkSize_, data.size() - from));
+            auto sealed = sealer_->sealChunk(purpose, *id, i, i + 1 == count, part);
+            if (!sealed) {
+                return std::unexpected(sealed.error());
+            }
+            if (auto st = blobs.append(*id, i, *sealed); !st) {
+                return std::unexpected(st.error());
+            }
+        }
+        if (auto st = blobs.finish(*id, data.size(), count); !st) {
+            return std::unexpected(st.error());
+        }
+        if (auto st = blobs.promote(*id); !st) {
+            return std::unexpected(st.error());
+        }
+        return *id;
+    }
+
+    // Запись есть в хранилище: следующие файлы с этим именем и содержимым видят ее.
+    void noteCommitted(const Content& content, EntryId id) {
+        seen_.emplace(*content.sha256, id);
+        if (content.replaces) {
+            replaced_.insert(id);
+        } else {
+            paths_.siblingsOf(content.parent).settle(foldForSearch(content.name), id);
+        }
+    }
+
+    // Большой файл: запечатать и записать текущий кусок; тип файла - по первому куску.
+    Status flushChunk(bool last) {
+        auto& file = *current_;
+        if (!file.writer) {
+            sniff(file.content, buffer_);
+            file.collectThumb = file.content.kind == Kind::Photo;
+            auto writer = ports_.store.blobs().create();
+            if (!writer) {
+                failCurrent(writer.error().message);
+                return fatalOnly(writer.error());
+            }
+            file.writer = std::move(*writer);
         }
         if (file.collectThumb) {
-            if (file.thumbSource.size() + file.buffer.size() > domain::kThumbnailSourceLimit) {
+            if (file.thumbSource.size() + buffer_.size() > domain::kThumbnailSourceLimit) {
                 file.collectThumb = false; // слишком большое фото - будет заглушка
                 domain::secureWipe(file.thumbSource);
                 file.thumbSource.shrink_to_fit();
             } else {
-                file.thumbSource.insert(file.thumbSource.end(), file.buffer.begin(),
-                                        file.buffer.end());
+                appendWiping(file.thumbSource, buffer_, domain::kThumbnailSourceLimit);
             }
         }
-        auto sealed = sealer_->sealChunk(KeyPurpose::Content, file.writer->id(), file.chunks, last,
-                                         file.buffer);
+        auto sealed =
+            sealer_->sealChunk(KeyPurpose::Content, file.writer->id(), file.chunks, last, buffer_);
         if (!sealed) {
             failCurrent(sealed.error().message);
             return {};
@@ -429,20 +689,20 @@ private:
             failCurrent(st.error().message);
             return fatalOnly(st.error());
         }
-        file.size += file.buffer.size();
+        file.content.size += buffer_.size();
         ++file.chunks;
-        domain::secureWipe(file.buffer); // емкость остается под следующий кусок
+        domain::secureWipe(buffer_); // емкость остается под следующий кусок
         return {};
     }
 
-    // Все куски записаны: размер, миниатюра, запись + promote одной транзакцией.
+    // Большой файл: все куски записаны -> размер, миниатюра, запись + promote одной транзакцией.
     Status complete() {
         auto& file = *current_;
         const auto failWith = [this](const Error& e) {
             failCurrent(e.message);
             return fatalOnly(e);
         };
-        if (auto st = file.writer->finish(file.size); !st) {
+        if (auto st = file.writer->finish(file.content.size); !st) {
             return failWith(st.error());
         }
         if (file.collectThumb && !file.thumbSource.empty()) {
@@ -459,17 +719,20 @@ private:
                 } // иначе - без миниатюры: карточка-заглушка, не ошибка
             }
         }
+        file.content.blob = file.writer->id();
+        file.content.thumb = file.thumbBlob;
 
         auto uow = ports_.store.begin();
         if (!uow) {
             return failWith(uow.error());
         }
         const auto now = domain::toUnixMillis(ports_.clock.now());
-        auto id = file.replaces ? replaceEntry(**uow, now) : insertEntry(**uow, now);
+        auto id = file.content.replaces ? replaceEntry(**uow, now, file.content)
+                                        : insertEntry(**uow, now, file.content);
         if (!id) {
             return failWith(id.error());
         }
-        if (auto st = (*uow)->blobs().promote(file.writer->id()); !st) {
+        if (auto st = (*uow)->blobs().promote(file.content.blob); !st) {
             return failWith(st.error());
         }
         if (file.thumbBlob) {
@@ -481,47 +744,42 @@ private:
             return failWith(st.error());
         }
         file.committed = true;
-        if (!file.replaces) {
-            // следующие файлы партии с этим именем уже конфликтуют с ним
-            paths_.siblingsOf(file.parent).add(foldForSearch(file.name), {*id, false});
-        }
+        noteCommitted(file.content, *id);
         session_.catalogChanged({.entries = {*id}});
         return {};
     }
 
     // Поля записи, которые определяются самим файлом.
-    void applyContent(domain::EntryMeta& meta, std::int64_t now) const {
-        const auto& file = *current_;
-        meta.kind = file.kind;
-        meta.mime = file.mime;
-        meta.size = file.size;
-        meta.url = file.url;
+    static void applyContent(domain::EntryMeta& meta, std::int64_t now, const Content& content) {
+        meta.kind = content.kind;
+        meta.mime = content.mime;
+        meta.size = content.size;
+        meta.url = content.url;
         meta.modifiedAt = now;
-        meta.blobId = file.writer->id();
-        meta.thumbBlobId = file.thumbBlob;
-        meta.sourceModifiedAt = file.sourceModifiedAt;
+        meta.blobId = content.blob;
+        meta.thumbBlobId = content.thumb;
+        meta.sourceModifiedAt = content.sourceModifiedAt;
+        meta.sha256 = content.sha256;
         // Описывали прежнее содержимое (при замене); у нового их пока никто не считает.
         // Откуда запись (source, sourceUrl, sourceDate) - свойство записи, остается.
-        meta.sha256.reset();
         meta.dimensions.reset();
         meta.durationMs.reset();
     }
 
-    Result<EntryId> insertEntry(domain::UnitOfWork& uow, std::int64_t now) {
-        const auto& file = *current_;
+    Result<EntryId> insertEntry(domain::UnitOfWork& uow, std::int64_t now, const Content& content) {
         domain::EntryRecord record;
-        record.parentId = file.parent;
+        record.parentId = content.parent;
         record.isFolder = false;
-        record.blobId = file.writer->id();
-        record.thumbBlobId = file.thumbBlob;
+        record.blobId = content.blob;
+        record.thumbBlobId = content.thumb;
         auto id = uow.entries().insert(record);
         if (!id) {
             return std::unexpected(id.error());
         }
         domain::EntryMeta meta;
         meta.createdAt = now;
-        applyContent(meta, now);
-        auto encName = sealer_->sealName(*id, file.name);
+        applyContent(meta, now, content);
+        auto encName = sealer_->sealName(*id, content.name);
         if (!encName) {
             return std::unexpected(encName.error());
         }
@@ -536,9 +794,9 @@ private:
     }
 
     // Существующая запись получает новые блобы и содержимое меты; старые блобы уходят здесь же.
-    Result<EntryId> replaceEntry(domain::UnitOfWork& uow, std::int64_t now) {
-        const auto& file = *current_;
-        auto record = uow.entries().get(*file.replaces);
+    Result<EntryId> replaceEntry(domain::UnitOfWork& uow, std::int64_t now,
+                                 const Content& content) {
+        auto record = uow.entries().get(*content.replaces);
         if (!record) {
             return std::unexpected(record.error());
         }
@@ -546,7 +804,7 @@ private:
         if (!entry) {
             return std::unexpected(entry.error());
         }
-        applyContent(entry->meta, now);
+        applyContent(entry->meta, now, content);
         auto encMeta = sealer_->sealMeta(record->id, entry->meta);
         domain::secureWipe(entry->name);
         domain::secureWipe(entry->meta.description);
@@ -555,8 +813,8 @@ private:
         }
         const auto oldBlob = record->blobId;
         const auto oldThumb = record->thumbBlobId;
-        record->blobId = file.writer->id();
-        record->thumbBlobId = file.thumbBlob;
+        record->blobId = content.blob;
+        record->thumbBlobId = content.thumb;
         record->encMeta = std::move(*encMeta);
         if (auto st = uow.entries().update(*record); !st) {
             return std::unexpected(st.error());
@@ -590,19 +848,36 @@ private:
     }
 
     void wipeCurrent() noexcept {
+        domain::secureWipe(buffer_);
         if (current_) {
-            domain::secureWipe(current_->buffer);
             domain::secureWipe(current_->thumbSource);
         }
+    }
+
+    void wipeBatch() noexcept {
+        for (auto& item : batch_) {
+            domain::secureWipe(item.data);
+            domain::secureWipe(item.thumb);
+        }
+        batch_.clear();
+        queuedSha_.clear();
+        queuedBytes_ = 0;
     }
 
     Lease lease_; // объявлена первой -> освобождается последней (после discard)
     Ports ports_;
     VaultSession& session_;
     std::shared_ptr<const Sealer> sealer_;
+    VaultSession::CatalogPtr snapshot_; // каталог на начало импорта: поиск повторов
     PathFolders paths_; // папки пути и занятые имена; каталог на начало импорта
     std::uint32_t chunkSize_;
     std::optional<CurrentFile> current_;
+    Bytes buffer_; // текущий кусок (<= chunkSize); у небольшого файла - он весь
+    std::vector<Queued> batch_;
+    std::unordered_set<domain::Sha256, Sha256Hash> queuedSha_;
+    std::uint64_t queuedBytes_ = 0;
+    std::unordered_map<domain::Sha256, EntryId, Sha256Hash> seen_; // записано этим импортом
+    std::unordered_set<EntryId> replaced_; // заменены этим импортом: снимок о них устарел
     domain::ImportResult result_;
 };
 

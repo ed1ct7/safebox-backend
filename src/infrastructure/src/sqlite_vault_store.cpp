@@ -270,6 +270,45 @@ class SqliteBlobRepository final : public domain::BlobRepository {
 public:
     explicit SqliteBlobRepository(Database& db) noexcept : db_(db) {}
 
+    Result<BlobId> create() override {
+        auto st = db_.cached("INSERT INTO blobs(status, size, chunk_count) VALUES (0, 0, 0)");
+        if (!st) {
+            return std::unexpected(st.error());
+        }
+        if (auto done = (*st)->run(); !done) {
+            return std::unexpected(done.error());
+        }
+        return db_.lastInsertRowId();
+    }
+
+    Status append(BlobId id, std::uint32_t index, std::span<const std::byte> sealedChunk) override {
+        auto st = db_.cached("INSERT INTO chunks(blob_id, idx, data) VALUES (?1, ?2, ?3)");
+        if (!st) {
+            return std::unexpected(st.error());
+        }
+        (*st)->bind(1, id).bind(2, static_cast<std::int64_t>(index)).bind(3, sealedChunk);
+        return (*st)->run();
+    }
+
+    Status finish(BlobId id, std::uint64_t plainSize, std::uint32_t chunkCount) override {
+        auto st =
+            db_.cached("UPDATE blobs SET size = ?1, chunk_count = ?2 WHERE id = ?3 AND status = 0");
+        if (!st) {
+            return std::unexpected(st.error());
+        }
+        (*st)
+            ->bind(1, static_cast<std::int64_t>(plainSize))
+            .bind(2, static_cast<std::int64_t>(chunkCount))
+            .bind(3, id);
+        if (auto done = (*st)->run(); !done) {
+            return done;
+        }
+        if (db_.changes() == 0) {
+            return fail(Error::Code::NotFound, "Незавершённые данные файла не найдены");
+        }
+        return {};
+    }
+
     Status promote(BlobId id) override {
         auto st = db_.cached("UPDATE blobs SET status = 1 WHERE id = ?1 AND status = 0");
         if (!st) {

@@ -152,10 +152,18 @@ public:
 
 // ImportExportService
 
-// Что известно о файле кроме пути: дата исходного файла и как поступить, если имя занято.
+// Файл с тем же содержимым (sha256) уже есть в сейфе или раньше в этом же импорте.
+enum class DuplicatePolicy {
+    Skip,   // не записывать, сообщить в ImportResult::duplicates
+    Import, // записать еще раз
+};
+
+// Что известно о файле кроме пути: дата исходного файла и как поступить, если имя занято или
+// такое содержимое уже есть.
 struct ImportFileOptions {
     std::optional<std::int64_t> sourceModifiedAt; // unix-мс изменения файла на диске
     ConflictPolicy onConflict = ConflictPolicy::KeepBoth;
+    DuplicatePolicy onDuplicate = DuplicatePolicy::Skip;
 };
 
 // Потоковый импорт одного запроса: http проталкивает части multipart по

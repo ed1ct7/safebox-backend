@@ -55,6 +55,26 @@ private:
     return key;
 }
 
+class SodiumSha256 final : public domain::Sha256Hasher {
+public:
+    SodiumSha256() noexcept { crypto_hash_sha256_init(&state_); }
+    ~SodiumSha256() override { sodium_memzero(&state_, sizeof state_); }
+
+    void update(std::span<const std::byte> data) noexcept override {
+        crypto_hash_sha256_update(&state_, reinterpret_cast<const unsigned char*>(data.data()),
+                                  data.size());
+    }
+
+    domain::Sha256 finish() noexcept override {
+        domain::Sha256 out{};
+        crypto_hash_sha256_final(&state_, reinterpret_cast<unsigned char*>(out.data()));
+        return out;
+    }
+
+private:
+    crypto_hash_sha256_state state_{};
+};
+
 class SodiumCrypto final : public domain::CryptoSuite {
 public:
     Result<KeyHandle> deriveKek(std::string_view password, std::span<const std::byte> salt,
@@ -173,6 +193,10 @@ public:
         sodium_bin2base64(text.data(), text.size(), raw.data(), raw.size(), variant);
         sodium_memzero(raw.data(), raw.size());
         return std::string(text.data());
+    }
+
+    std::unique_ptr<domain::Sha256Hasher> sha256() override {
+        return std::make_unique<SodiumSha256>();
     }
 
     bool equalConstantTime(std::string_view a, std::string_view b) override {
