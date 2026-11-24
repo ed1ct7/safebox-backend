@@ -1677,3 +1677,53 @@ TEST_CASE("PUT thumbnail takes an image body and frame info from the query", "[h
     CHECK(f.request("PUT", "/api/v1/entries/7", {bearer, "Content-Type: image/png"}, "x").status ==
           415);
 }
+
+TEST_CASE("PATCH sets origin fields; entries, search and sources show them",
+          "[http][entries][source]") {
+    HttpFixture f;
+    auto set =
+        f.api("PATCH", "/api/v1/entries/2",
+              R"({"source":"telegram","sourceUrl":"https://t.me/c/1","sourceDate":1700000000000})");
+    REQUIRE(set.status == 200);
+    CHECK(set.json()["source"] == "telegram");
+    CHECK(set.json()["sourceUrl"] == "https://t.me/c/1");
+    CHECK(set.json()["sourceDate"] == 1700000000000);
+    CHECK_FALSE(set.json().contains("sha256"));
+    REQUIRE(f.fakes.entries->lastUpdate.has_value());
+    CHECK_FALSE(f.fakes.entries->lastUpdate->name.has_value());
+
+    auto cleared = f.api("PATCH", "/api/v1/entries/2",
+                         R"({"source":null,"sourceUrl":null,"sourceDate":null})");
+    REQUIRE(cleared.status == 200);
+    CHECK(f.fakes.entries->lastUpdate->source == "");
+    CHECK(f.fakes.entries->lastUpdate->sourceUrl == "");
+    REQUIRE(f.fakes.entries->lastUpdate->sourceDate.has_value());
+    CHECK_FALSE(f.fakes.entries->lastUpdate->sourceDate->has_value());
+    CHECK_FALSE(cleared.json().contains("source"));
+    CHECK_FALSE(cleared.json().contains("sourceDate"));
+
+    CHECK(f.api("PATCH", "/api/v1/entries/2", R"({"sourceDate":"вчера"})").status == 400);
+    CHECK(f.api("PATCH", "/api/v1/entries/2", R"({"sourceDate":1.5})").status == 400);
+    CHECK(f.api("PATCH", "/api/v1/entries/2", R"({"source":7})").status == 400);
+
+    domain::Sha256 hash{};
+    hash[0] = std::byte{0xAB};
+    hash[31] = std::byte{0x01};
+    f.fakes.entries->entries[2].meta.sha256 = hash;
+    const auto sha = f.api("GET", "/api/v1/entries/2").json()["sha256"].get<std::string>();
+    CHECK(sha.size() == 64);
+    CHECK(sha.starts_with("ab00"));
+    CHECK(sha.ends_with("0001"));
+
+    CHECK(f.api("GET", "/api/v1/search?source=Telegram").status == 200);
+    CHECK(f.fakes.search->lastQuery.source == "Telegram");
+    CHECK(f.api("GET", "/api/v1/search?q=x").status == 200);
+    CHECK(f.fakes.search->lastQuery.source.empty());
+
+    auto sources = f.api("GET", "/api/v1/sources");
+    REQUIRE(sources.status == 200);
+    CHECK(sources.json() ==
+          http::Json::parse(
+              R"({"sources":[{"source":"telegram","count":3},{"source":"YouTube","count":1}]})"));
+    CHECK(f.request("GET", "/api/v1/sources").status == 401);
+}

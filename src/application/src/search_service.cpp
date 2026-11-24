@@ -70,7 +70,8 @@ public:
 
     Result<SearchResults> search(const Lease& lease, const SearchQuery& query) override {
         const auto needle = foldForSearch(domain::detail::trim(query.text));
-        if (needle.empty() && query.tags.empty()) {
+        const auto source = foldForSearch(domain::detail::trim(query.source));
+        if (needle.empty() && query.tags.empty() && source.empty()) {
             return SearchResults{};
         }
         auto ctx = contextOf(lease);
@@ -131,6 +132,10 @@ public:
                     continue;
                 }
             }
+            if (!source.empty() && (node->entry.meta.source.empty() ||
+                                    foldForSearch(node->entry.meta.source) != source)) {
+                continue;
+            }
             if (!groups->empty() && !hasTags(cat.effectiveTags(node->entry.id), *groups)) {
                 continue;
             }
@@ -155,6 +160,40 @@ public:
             hit.matchedIn = match.matchedIn;
             out.hits.push_back(std::move(hit));
         }
+        return out;
+    }
+
+    Result<std::vector<SourceCount>> sources(const Lease& lease) override {
+        auto ctx = contextOf(lease);
+        if (!ctx) {
+            return std::unexpected(ctx.error());
+        }
+        auto catalog = catalogOf(*ctx, ports_.store);
+        if (!catalog) {
+            return std::unexpected(catalog.error());
+        }
+        const Catalog& cat = **catalog;
+        const auto trashed = cat.trashedIds();
+        std::map<std::string, SourceCount> byFolded;
+        for (const auto& [id, node] : cat.nodes()) {
+            const auto& source = node->entry.meta.source;
+            if (source.empty() || trashed.contains(id)) {
+                continue;
+            }
+            auto& item = byFolded[foldForSearch(source)];
+            if (item.count == 0 || source < item.source) {
+                item.source = source;
+            }
+            ++item.count;
+        }
+        std::vector<SourceCount> out;
+        out.reserve(byFolded.size());
+        for (auto& [folded, item] : byFolded) {
+            out.push_back(std::move(item));
+        }
+        std::stable_sort(out.begin(), out.end(), [](const SourceCount& x, const SourceCount& y) {
+            return x.count > y.count;
+        });
         return out;
     }
 

@@ -274,3 +274,108 @@ TEST_CASE("services refuse to work after lock", "[entries][UF-13]") {
     locker.join();
     CHECK_FALSE(f.store.isOpen());
 }
+
+TEST_CASE("origin fields: set, clear, check, survive a relock", "[entries][source]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    REQUIRE(f.importFiles(s, {{"post.jpg", "data"}}).imported == 1);
+    const auto id = f.entryNamed(s, "post.jpg").id;
+    const auto update = [&](app::UpdateEntryCmd cmd) {
+        return f.services.entries->update(f.lease(s), id, cmd);
+    };
+
+    auto set = update({.source = "  Telegram ",
+                       .sourceUrl = "https://t.me/channel/42",
+                       .sourceDate = std::optional<std::int64_t>{1'700'000'000'000}});
+    REQUIRE(set.has_value());
+    CHECK(set->meta.source == "Telegram");
+    CHECK(set->meta.sourceUrl == "https://t.me/channel/42");
+    CHECK(set->meta.sourceDate == 1'700'000'000'000);
+
+    // поле не указано - не трогается
+    REQUIRE(update({.description = "подпись"}).has_value());
+    s = [&] {
+        f.services.safe->lock();
+        auto again = f.services.safe->unlock({"test", "secret1"});
+        REQUIRE(again.has_value());
+        return *again;
+    }();
+    auto kept = f.entryNamed(s, "post.jpg");
+    CHECK(kept.meta.source == "Telegram");
+    CHECK(kept.meta.sourceUrl == "https://t.me/channel/42");
+    CHECK(kept.meta.sourceDate == 1'700'000'000'000);
+
+    CHECK(update({.source = std::string(65, 'a')}).error().code == Code::InvalidArgument);
+    CHECK(update({.source = "a\tb"}).error().code == Code::InvalidArgument);
+    CHECK(update({.source = "\xFF"}).error().code == Code::InvalidArgument);
+    CHECK(update({.sourceUrl = "javascript:alert(1)"}).error().code == Code::InvalidArgument);
+    CHECK(update({.source = std::string(64, 'a')}).has_value());
+    // 64 символа кириллицей - 128 байт, тоже можно
+    std::string cyrillic;
+    for (int i = 0; i < 64; ++i) {
+        cyrillic += "ж";
+    }
+    CHECK(update({.source = cyrillic})->meta.source == cyrillic);
+
+    auto cleared = update(
+        {.source = "",
+         .sourceUrl = " ",
+         .sourceDate = std::optional<std::optional<std::int64_t>>{std::optional<std::int64_t>{}}});
+    REQUIRE(cleared.has_value());
+    CHECK(cleared->meta.source.empty());
+    CHECK(cleared->meta.sourceUrl.empty());
+    CHECK_FALSE(cleared->meta.sourceDate.has_value());
+}
+
+TEST_CASE("search filters by source; sources lists them without the trash", "[search][source]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    REQUIRE(f.importFiles(s, {{"a/1.jpg", "1"},
+                              {"a/2.jpg", "2"},
+                              {"b/3.jpg", "3"},
+                              {"b/4.jpg", "4"},
+                              {"5.txt", "5"}})
+                .imported == 5);
+    const auto a = f.entryNamed(s, "a").id;
+    const auto b = f.entryNamed(s, "b").id;
+    const auto setSource = [&](domain::EntryId id, std::string source) {
+        REQUIRE(
+            f.services.entries->update(f.lease(s), id, {.source = std::move(source)}).has_value());
+    };
+    setSource(f.entryNamed(s, "1.jpg", a).id, "telegram");
+    setSource(f.entryNamed(s, "2.jpg", a).id, "Telegram");
+    setSource(f.entryNamed(s, "3.jpg", b).id, "telegram");
+    setSource(f.entryNamed(s, "4.jpg", b).id, "Ютуб");
+
+    const auto found = [&](app::SearchQuery query) {
+        auto result = f.services.search->search(f.lease(s), query);
+        REQUIRE(result.has_value());
+        std::vector<std::string> names;
+        for (const auto& hit : result->hits) {
+            names.push_back(hit.entry.name);
+        }
+        std::sort(names.begin(), names.end());
+        return names;
+    };
+    using Names = std::vector<std::string>;
+    CHECK(found({.source = "TELEGRAM"}) == Names{"1.jpg", "2.jpg", "3.jpg"});
+    CHECK(found({.source = "ютуб"}) == Names{"4.jpg"});
+    CHECK(found({.source = "tele"}).empty()); // точное совпадение, не подстрока
+    CHECK(found({.text = "3", .source = "telegram"}) == Names{"3.jpg"});
+    CHECK(found({.within = a, .source = "telegram"}) == Names{"1.jpg", "2.jpg"});
+
+    auto sources = f.services.search->sources(f.lease(s));
+    REQUIRE(sources.has_value());
+    REQUIRE(sources->size() == 2);
+    CHECK((*sources)[0].source == "Telegram"); // из написаний - первое по алфавиту
+    CHECK((*sources)[0].count == 3);
+    CHECK((*sources)[1].source == "Ютуб");
+    CHECK((*sources)[1].count == 1);
+
+    const domain::EntryId trashed[] = {b};
+    REQUIRE(f.services.entries->remove(f.lease(s), trashed).has_value());
+    CHECK(found({.source = "telegram"}) == Names{"1.jpg", "2.jpg"});
+    sources = f.services.search->sources(f.lease(s));
+    REQUIRE(sources->size() == 1);
+    CHECK((*sources)[0].count == 2);
+}

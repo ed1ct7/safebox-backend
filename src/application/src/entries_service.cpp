@@ -203,7 +203,8 @@ public:
 
     Result<domain::Entry> update(const Lease& lease, EntryId id,
                                  const UpdateEntryCmd& cmd) override {
-        if (!cmd.name && !cmd.description && !cmd.url) {
+        if (!cmd.name && !cmd.description && !cmd.url && !cmd.source && !cmd.sourceUrl &&
+            !cmd.sourceDate) {
             return fail(Error::Code::InvalidArgument, "Не указано, что менять");
         }
         std::string name;
@@ -227,6 +228,22 @@ public:
             if (!domain::isHttpUrl(url)) {
                 return fail(Error::Code::InvalidArgument,
                             "Адрес должен начинаться с http:// или https://");
+            }
+        }
+        std::string source;
+        if (cmd.source) {
+            auto valid = domain::validateSource(*cmd.source);
+            if (!valid) {
+                return std::unexpected(valid.error());
+            }
+            source = std::move(*valid);
+        }
+        std::string sourceUrl;
+        if (cmd.sourceUrl) {
+            sourceUrl = std::string(domain::detail::trim(*cmd.sourceUrl));
+            if (!sourceUrl.empty() && !domain::isHttpUrl(sourceUrl)) {
+                return fail(Error::Code::InvalidArgument,
+                            "Адрес источника должен начинаться с http:// или https://");
             }
         }
         auto ctx = contextOf(lease);
@@ -266,6 +283,15 @@ public:
             }
             if (cmd.url) {
                 entry.meta.url = std::move(url);
+            }
+            if (cmd.source) {
+                entry.meta.source = std::move(source);
+            }
+            if (cmd.sourceUrl) {
+                entry.meta.sourceUrl = std::move(sourceUrl);
+            }
+            if (cmd.sourceDate) {
+                entry.meta.sourceDate = *cmd.sourceDate;
             }
             entry.meta.modifiedAt = domain::toUnixMillis(ports_.clock.now());
             auto encName = sealer.sealName(id, entry.name);

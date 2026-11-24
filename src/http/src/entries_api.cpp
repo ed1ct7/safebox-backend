@@ -203,12 +203,17 @@ void registerEntriesApi(httplib::Server& server, ApiContext& ctx) {
                      app::UpdateEntryCmd cmd;
                      if (!readOptionalString(*body, "name", cmd.name, res) ||
                          !readOptionalString(*body, "description", cmd.description, res) ||
-                         !readOptionalString(*body, "url", cmd.url, res)) {
+                         !readOptionalString(*body, "url", cmd.url, res) ||
+                         !readClearableString(*body, "source", cmd.source, res) ||
+                         !readClearableString(*body, "sourceUrl", cmd.sourceUrl, res) ||
+                         !readSourceDate(*body, cmd.sourceDate, res)) {
                          return;
                      }
-                     if (!cmd.name && !cmd.description && !cmd.url) {
+                     if (!cmd.name && !cmd.description && !cmd.url && !cmd.source &&
+                         !cmd.sourceUrl && !cmd.sourceDate) {
                          sendError(res, 400, "bad_request",
-                                   "Укажите хотя бы одно поле: name, description или url");
+                                   "Укажите хотя бы одно поле: name, description, url, source, "
+                                   "sourceUrl или sourceDate");
                          return;
                      }
                      auto entry = ctx.services.entries->update(*lease, *id, cmd);

@@ -46,6 +46,35 @@ bool readOptionalString(const Json& body, const char* field, std::optional<std::
     return true;
 }
 
+bool readClearableString(const Json& body, const char* field, std::optional<std::string>& value,
+                         httplib::Response& res) {
+    const auto it = body.find(field);
+    if (it != body.end() && it->is_null()) {
+        value = std::string{};
+        return true;
+    }
+    return readOptionalString(body, field, value, res);
+}
+
+bool readSourceDate(const Json& body, std::optional<std::optional<std::int64_t>>& value,
+                    httplib::Response& res) {
+    const auto it = body.find("sourceDate");
+    if (it == body.end()) {
+        return true;
+    }
+    if (it->is_null()) {
+        value = std::optional<std::int64_t>{};
+        return true;
+    }
+    if (!it->is_number_integer()) {
+        sendError(res, 400, "bad_request",
+                  "Поле 'sourceDate' должно быть целым (unix-мс) или null");
+        return false;
+    }
+    value = it->get<std::int64_t>();
+    return true;
+}
+
 std::optional<domain::EntryId> parseId(std::string_view text) noexcept {
     domain::EntryId id = 0;
     const auto* end = text.data() + text.size();
@@ -227,6 +256,26 @@ Json toJson(const domain::Entry& entry) {
     }
     if (entry.meta.trashedAt) {
         j["trashedAt"] = *entry.meta.trashedAt; // только у корня корзины
+    }
+    if (!entry.meta.source.empty()) {
+        j["source"] = entry.meta.source;
+    }
+    if (!entry.meta.sourceUrl.empty()) {
+        j["sourceUrl"] = entry.meta.sourceUrl;
+    }
+    if (entry.meta.sourceDate) {
+        j["sourceDate"] = *entry.meta.sourceDate;
+    }
+    if (entry.meta.sha256) {
+        static constexpr char kHex[] = "0123456789abcdef";
+        std::string hex;
+        hex.reserve(64);
+        for (const auto b : *entry.meta.sha256) {
+            const auto u = static_cast<unsigned>(b);
+            hex.push_back(kHex[u >> 4]);
+            hex.push_back(kHex[u & 0x0F]);
+        }
+        j["sha256"] = std::move(hex);
     }
     if (entry.meta.dimensions) { // известны - от клиента (PUT миниатюры)
         j["width"] = entry.meta.dimensions->width;

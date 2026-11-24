@@ -1,5 +1,7 @@
-// GET /api/v1/search?q=&tags=1,2,3&match=categories|all|any&within=<id>&sort=&order=&offset=&limit=
+// GET /api/v1/search?q=&tags=1,2,3&match=categories|all|any&within=<id>&source=&sort=&order=
+//     &offset=&limit=
 // Без limit выдаются все совпадения; total - сколько их всего.
+// GET /api/v1/sources -> {sources: [{source, count}]} - для фильтра по источнику.
 #include "dto.hpp"
 
 namespace safebox::http {
@@ -37,6 +39,7 @@ void registerSearchApi(httplib::Server& server, ApiContext& ctx) {
         }
         app::SearchQuery query;
         query.text = req.get_param_value("q");
+        query.source = req.get_param_value("source");
         if (!readListOptions(req, query.page, res)) {
             return;
         }
@@ -74,6 +77,23 @@ void registerSearchApi(httplib::Server& server, ApiContext& ctx) {
         sendJson(
             res,
             Json{{"query", query.text}, {"results", std::move(results)}, {"total", found->total}});
+    });
+
+    server.Get("/api/v1/sources", [&ctx](const httplib::Request& req, httplib::Response& res) {
+        auto lease = requireApi(ctx, req, res);
+        if (!lease) {
+            return;
+        }
+        auto sources = ctx.services.search->sources(*lease);
+        if (!sources) {
+            sendError(res, sources.error());
+            return;
+        }
+        Json items = Json::array();
+        for (const auto& item : *sources) {
+            items.push_back(Json{{"source", item.source}, {"count", item.count}});
+        }
+        sendJson(res, Json{{"sources", std::move(items)}});
     });
 }
 

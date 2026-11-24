@@ -171,6 +171,15 @@ public:
         if (cmd.url) {
             it->second.meta.url = *cmd.url;
         }
+        if (cmd.source) {
+            it->second.meta.source = *cmd.source;
+        }
+        if (cmd.sourceUrl) {
+            it->second.meta.sourceUrl = *cmd.sourceUrl;
+        }
+        if (cmd.sourceDate) {
+            it->second.meta.sourceDate = *cmd.sourceDate;
+        }
         return it->second;
     }
 
@@ -339,6 +348,13 @@ public:
         hit.path = {{1, "Отпуск"}};
         hit.matchedIn = matchedIn;
         return app::SearchResults{{hit}, 1};
+    }
+
+    app::Result<std::vector<app::SourceCount>> sources(const app::Lease&) override {
+        if (error) {
+            return std::unexpected(*error);
+        }
+        return std::vector<app::SourceCount>{{"telegram", 3}, {"YouTube", 1}};
     }
 
     domain::MatchedIn matchedIn = domain::MatchedIn::None;

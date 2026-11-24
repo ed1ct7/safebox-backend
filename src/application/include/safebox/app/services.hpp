@@ -122,6 +122,10 @@ struct UpdateEntryCmd {
     std::optional<std::string> name;        // ставит nameByUser
     std::optional<std::string> description; // <= 64 КиБ, ставит descriptionByUser
     std::optional<std::string> url;         // только у ссылки, http/https
+    // Происхождение: пустая строка / nullopt внутри - снять.
+    std::optional<std::string> source;                     // validateSource
+    std::optional<std::string> sourceUrl;                  // http/https
+    std::optional<std::optional<std::int64_t>> sourceDate; // unix-мс
 };
 
 enum class ConflictPolicy {
@@ -426,7 +430,13 @@ struct SearchQuery {
     std::vector<domain::TagId> tags;
     TagMatch match = TagMatch::Categories;
     std::optional<domain::EntryId> within; // только потомки этой записи, ее самой в выдаче нет
-    ListOptions page;                      // по умолчанию - все совпадения по имени
+    std::string source; // только с этим источником (без учета регистра); пусто - любые
+    ListOptions page;   // по умолчанию - все совпадения по имени
+};
+
+struct SourceCount {
+    std::string source; // как записан (из разных написаний - первое по алфавиту)
+    std::size_t count = 0;
 };
 
 struct SearchResults {
@@ -439,10 +449,12 @@ public:
     virtual ~SearchService() = default;
 
     // Текст - без учета регистра (кириллица включительно, "ё" = "е") в имени, иначе в описании;
-    // теги - по прямым и унаследованным. Пусто и то и другое -> []. Неизвестный тег ->
-    // InvalidArgument, неизвестный within -> NotFound.
+    // теги - по прямым и унаследованным; источник - точное совпадение без учета регистра.
+    // Ничего не задано -> []. Неизвестный тег -> InvalidArgument, неизвестный within -> NotFound.
     [[nodiscard]] virtual Result<SearchResults> search(const Lease& lease,
                                                        const SearchQuery& query) = 0;
+    // Источники записей вне корзины, по убыванию числа записей.
+    [[nodiscard]] virtual Result<std::vector<SourceCount>> sources(const Lease& lease) = 0;
 };
 
 // LinksService

@@ -26,6 +26,7 @@ inline constexpr std::size_t kMaxUrlBytes = 8192;
 inline constexpr std::size_t kMaxTagNameChars = 100;
 inline constexpr std::size_t kMaxDescriptionBytes = 64 * 1024;
 inline constexpr std::size_t kMaxTagsPerEntry = 1000;
+inline constexpr std::size_t kMaxSourceChars = 64;
 // Сколько первых байтов нужно detectKind (сигнатуры + ярлык .url).
 inline constexpr std::size_t kSniffBytes = 64 * 1024;
 
@@ -252,6 +253,28 @@ namespace detail {
         return std::string{};
     }
     return validateTagName(name);
+}
+
+// Источник записи ("telegram", "youtube"): пробелы по краям срезаются, пусто -> не задан.
+// До 64 символов (влезает в u16 enc_meta без обрезки), без управляющих.
+[[nodiscard]] inline Result<std::string> validateSource(std::string_view source) {
+    const auto clean = detail::trim(source);
+    if (clean.empty()) {
+        return std::string{};
+    }
+    if (!isValidUtf8(clean)) {
+        return fail(Error::Code::InvalidArgument, "Источник содержит некорректные символы");
+    }
+    if (utf8Length(clean) > kMaxSourceChars) {
+        return fail(Error::Code::InvalidArgument, "Источник длиннее 64 символов");
+    }
+    for (const char c : clean) {
+        const auto u = static_cast<unsigned char>(c);
+        if (u < 0x20 || u == 0x7F) {
+            return fail(Error::Code::InvalidArgument, "Источник содержит управляющие символы");
+        }
+    }
+    return std::string(clean);
 }
 
 // Имя из импорта: запрещенные символы и битый UTF-8 -> '_', пробелы по краям

@@ -91,6 +91,13 @@ void replaceHeader(httplib::Response& res, const std::string& key, const std::st
 [[nodiscard]] std::optional<domain::EntryId> parseId(std::string_view text) noexcept;
 // Параметры порядка и окна выдачи: sort=name|added|modified|date|size, order=asc|desc,
 // offset >= 0, limit >= 1. Нет параметра - значение по умолчанию; иначе 400 уже отправлен.
+// Строка или null (null -> "", то есть "снять"); нет поля -> value не трогается.
+[[nodiscard]] bool readClearableString(const Json& body, const char* field,
+                                       std::optional<std::string>& value, httplib::Response& res);
+// "sourceDate": целое (unix-мс) или null.
+[[nodiscard]] bool readSourceDate(const Json& body,
+                                  std::optional<std::optional<std::int64_t>>& value,
+                                  httplib::Response& res);
 [[nodiscard]] bool readListOptions(const httplib::Request& req, app::ListOptions& options,
                                    httplib::Response& res);
 // "keepBoth" | "replace" | "skip"
