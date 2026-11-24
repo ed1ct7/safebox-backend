@@ -1065,3 +1065,48 @@ TEST_CASE("a preview fetched after the safe was locked never reaches the file",
     CHECK(root["entries"][0]["name"] == "slow.example"); // название страницы не записалось
     CHECK_FALSE(root["entries"][0].contains("previewPending"));
 }
+
+TEST_CASE("a wrong password leaves an older schema untouched, the right one upgrades it",
+          "[integration][format][migration]") {
+    test::TempDir dir;
+    std::string safePath;
+    {
+        Stack stack(dir.path());
+        auto c = stack.client();
+        const auto session =
+            post(c, "/api/v1/safe/create",
+                 {{"path", "схема"}, {"password", "пароль-1"}, {"confirm", "пароль-1"}}, 201);
+        safePath = session["safe"]["path"].get<std::string>();
+        post(c, "/api/v1/safe/lock", Json::object(), 204,
+             bearer(session["token"].get<std::string>()));
+    }
+    const auto file = domain::pathFromUtf8(safePath);
+    const auto userVersion = [&] {
+        const auto h = test::readFile(file).substr(0, 100);
+        return (std::uint32_t(std::uint8_t(h[60])) << 24) |
+               (std::uint32_t(std::uint8_t(h[61])) << 16) |
+               (std::uint32_t(std::uint8_t(h[62])) << 8) | std::uint32_t(std::uint8_t(h[63]));
+    };
+    REQUIRE(userVersion() == domain::kFormatVersion);
+    // Схемы 3 и 4 совпадают по таблицам: файл с номером 3 - честный сейф схемы 3.
+    auto bytes = test::readFile(file);
+    bytes[60] = bytes[61] = bytes[62] = '\0';
+    bytes[63] = '\x03';
+    test::writeFile(file, bytes);
+
+    Stack stack(dir.path());
+    auto c = stack.client();
+    auto wrong =
+        c.Post("/api/v1/safe/unlock", Json{{"path", safePath}, {"password", "пароль-2"}}.dump(),
+               "application/json");
+    REQUIRE(wrong);
+    CHECK(wrong->status == 403);
+    CHECK(test::readFile(file) == bytes); // опечатка в пароле не трогает файл вовсе
+
+    const auto session =
+        post(c, "/api/v1/safe/unlock", {{"path", safePath}, {"password", "пароль-1"}}, 200);
+    const auto token = session["token"].get<std::string>();
+    CHECK(get(c, "/api/v1/entries", token)["entries"].empty());
+    post(c, "/api/v1/safe/lock", Json::object(), 204, bearer(token));
+    CHECK(userVersion() == domain::kFormatVersion);
+}

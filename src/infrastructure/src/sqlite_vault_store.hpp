@@ -43,6 +43,7 @@ public:
 
     domain::Status create(const std::filesystem::path& path, const domain::SafeMeta& meta) override;
     domain::Status open(const std::filesystem::path& path) override;
+    domain::Status upgrade() override;
     domain::Result<domain::SafeMeta> inspect(const std::filesystem::path& path) override;
     void close() noexcept override;
     bool isOpen() const override { return conn_.open.load(); }

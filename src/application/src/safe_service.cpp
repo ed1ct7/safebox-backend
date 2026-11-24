@@ -185,6 +185,10 @@ public:
         if (!master) {
             return closeWith(master.error());
         }
+        // Схема поднимается только с верным паролем: опечатка оставляет файл как был.
+        if (auto st = ports_.store.upgrade(); !st) {
+            return closeWith(st.error());
+        }
         (void)ports_.store.blobs().gcPending(); // хвосты импорта, прерванного сбоем
         auto result = startSession(path, std::move(*meta), std::move(*master));
         if (!result) {

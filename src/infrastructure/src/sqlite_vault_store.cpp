@@ -607,13 +607,18 @@ Status SqliteVaultStore::open(const std::filesystem::path& path) {
     if (auto st = verifyOpened(**db); !st) {
         return st;
     }
-    if (auto st = migrateIfNeeded(**db); !st) {
-        return st;
-    }
     conn_.db = std::move(*db);
     conn_.path = path;
     conn_.open.store(true);
     return {};
+}
+
+Status SqliteVaultStore::upgrade() {
+    auto lock = lockOpen(conn_);
+    if (!lock) {
+        return std::unexpected(lock.error());
+    }
+    return migrateIfNeeded(*conn_.db);
 }
 
 Result<domain::SafeMeta> SqliteVaultStore::inspect(const std::filesystem::path& path) {

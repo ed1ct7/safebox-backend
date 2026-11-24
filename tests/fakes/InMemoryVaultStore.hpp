@@ -103,6 +103,17 @@ public:
         return {};
     }
 
+    // Схем в памяти нет; число вызовов - чтобы тесты видели, когда сервис поднимает схему.
+    domain::Status upgrade() override {
+        std::scoped_lock lock(mutex_);
+        if (!open_) {
+            return domain::fail(domain::Error::Code::Internal, "store not open");
+        }
+        ++upgrades_;
+        return {};
+    }
+    std::size_t upgrades() const { return upgrades_.load(); }
+
     domain::Result<domain::SafeMeta> inspect(const std::filesystem::path& path) override {
         std::scoped_lock lock(mutex_);
         auto db = find(path);
@@ -541,6 +552,7 @@ private:
     std::map<std::string, std::shared_ptr<Db>> files_;
     std::shared_ptr<Db> open_;
     std::atomic<bool> isOpen_{false};
+    std::atomic<std::size_t> upgrades_{0};
     std::atomic<std::thread::id> owner_{};
     Blobs blobs_{*this};
 };

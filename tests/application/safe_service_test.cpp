@@ -59,6 +59,7 @@ TEST_CASE("unlock checks the password and the file", "[safe][UF-2]") {
     REQUIRE_FALSE(wrong.has_value());
     CHECK(wrong.error().code == Code::WrongPassword);
     CHECK_FALSE(f.store.isOpen());
+    CHECK(f.store.upgrades() == 0); // схема поднимается только после верного пароля
 
     auto missing = f.services.safe->unlock({"nope", "correct-horse"});
     REQUIRE_FALSE(missing.has_value());
@@ -71,6 +72,7 @@ TEST_CASE("unlock checks the password and the file", "[safe][UF-2]") {
 
     auto ok = f.services.safe->unlock({"vault", "correct-horse"}); // без .safebox
     REQUIRE(ok.has_value());
+    CHECK(f.store.upgrades() == 1);
     CHECK(f.services.safe->authorize(ok->tokens.api, app::TokenScope::Api).has_value());
 }
 

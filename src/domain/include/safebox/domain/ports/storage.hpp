@@ -167,7 +167,13 @@ public:
 
     [[nodiscard]] virtual Status create(const std::filesystem::path& path,
                                         const SafeMeta& meta) = 0;
+    // Открывает файл старой поддерживаемой схемы как есть: читать можно meta, номер схемы не
+    // меняется. Перед работой с записями - upgrade().
     [[nodiscard]] virtual Status open(const std::filesystem::path& path) = 0;
+    // Доводит схему открытого сейфа до текущей (одна транзакция; ошибка - файл не тронут).
+    // Вызывается только после проверки пароля: опечатка не должна переводить файл в новую
+    // схему, которую старые версии уже не откроют.
+    [[nodiscard]] virtual Status upgrade() = 0;
     // Только чтение: NotFound / NotASafe / IoError или meta файла. Открытый
     // сейф (если есть) не закрывается.
     [[nodiscard]] virtual Result<SafeMeta> inspect(const std::filesystem::path& path) = 0;

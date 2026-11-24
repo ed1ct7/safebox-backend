@@ -381,6 +381,7 @@ TEST_CASE("a file with user_version 1 is refused with a clear message", "[sqlite
     CHECK(opened.error().message ==
           "Сейф в старом формате (версия 1) не поддерживается - создайте новый сейф");
     CHECK_FALSE(store->isOpen());
+    CHECK(store->upgrade().error().code == Code::Locked); // поднимать нечего: сейф не открыт
     auto inspected = store->inspect(path);
     REQUIRE_FALSE(inspected.has_value());
     CHECK(inspected.error().code == Code::NotASafe);
@@ -412,7 +413,7 @@ std::int64_t userVersionOf(const std::filesystem::path& path) {
 
 } // namespace
 
-TEST_CASE("a v3 safe migrates to v4 on open: only the version changes",
+TEST_CASE("a v3 safe migrates to v4 on upgrade: only the version changes",
           "[sqlite][format][migration]") {
     TempDir dir;
     const auto path = dir / "v3.safebox";
@@ -437,7 +438,15 @@ TEST_CASE("a v3 safe migrates to v4 on open: only the version changes",
     const auto before = readFile(path);
 
     auto store = infra::makeSqliteVaultStore();
+    REQUIRE(store->open(path).has_value()); // open схему не трогает: meta читается и так
+    CHECK(store->meta().has_value());
+    store->close();
+    CHECK(userVersionOf(path) == 3);
+    CHECK(readFile(path) == before);
+
     REQUIRE(store->open(path).has_value());
+    REQUIRE(store->upgrade().has_value());
+    REQUIRE(store->upgrade().has_value()); // повтор на текущей схеме - ничего не делает
     {
         auto uow = store->begin();
         auto categories = (*uow)->tags().categories();
@@ -473,13 +482,13 @@ TEST_CASE("a failed migration rolls back and leaves the old schema",
         REQUIRE((*db)->exec("PRAGMA user_version = 2;").has_value());
     }
     auto store = infra::makeSqliteVaultStore();
-    auto opened = store->open(path);
-    REQUIRE_FALSE(opened.has_value());
-    CHECK_FALSE(store->isOpen());
+    REQUIRE(store->open(path).has_value());
+    CHECK_FALSE(store->upgrade().has_value());
+    store->close();
     CHECK(userVersionOf(path) == 2); // ни одного шага: вся цепочка - одна транзакция
 }
 
-TEST_CASE("a v2 safe migrates to v4 on open: names intact, nameEn empty, then writable",
+TEST_CASE("a v2 safe migrates to v4 on upgrade: names intact, nameEn empty, then writable",
           "[sqlite][format][migration]") {
     TempDir dir;
     const auto path = dir / "v2.safebox";
@@ -533,7 +542,8 @@ INSERT INTO meta(id, format_version, kdf_ops, kdf_mem, salt, chunk_size, envelop
     }
 
     auto store = infra::makeSqliteVaultStore();
-    REQUIRE(store->open(path).has_value()); // миграция прошла незаметно для вызывающего
+    REQUIRE(store->open(path).has_value());
+    REQUIRE(store->upgrade().has_value());
     {
         // UnitOfWork держит мьютекс хранилища: закрывать стор можно только после него
         auto uow = store->begin();
