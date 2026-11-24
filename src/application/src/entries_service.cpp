@@ -3,9 +3,11 @@
 // транзакция. Замененные записи удаляются после переноса: перенесенная запись, лежавшая внутри
 // замененной, к этому моменту уже вне ее поддерева.
 // после удаления делаем incremental_vacuum, чтобы файл уменьшился
+#include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
 
+#include "ordering.hpp"
 #include "safebox/domain/model/rules.hpp"
 #include "service_impls.hpp"
 #include "vault_session.hpp"
@@ -103,7 +105,8 @@ class EntriesServiceImpl final : public EntriesService {
 public:
     explicit EntriesServiceImpl(Ports ports) : ports_(ports) {}
 
-    Result<FolderListing> list(const Lease& lease, std::optional<EntryId> parent) override {
+    Result<FolderListing> list(const Lease& lease, std::optional<EntryId> parent,
+                               const ListOptions& options) override {
         auto ctx = contextOf(lease);
         if (!ctx) {
             return std::unexpected(ctx.error());
@@ -122,10 +125,23 @@ public:
             out.parent = describeEntry(ctx->session, cat, *node);
             out.path = cat.pathTo(*parent);
         }
+        // дети в каталоге уже по имени; иначе - сортировка, описание - только для окна
         const auto& ids = cat.childrenOf(parent);
-        out.entries.reserve(ids.size());
+        std::vector<const Catalog::Node*> nodes;
+        nodes.reserve(ids.size());
         for (const auto id : ids) {
-            out.entries.push_back(describeEntry(ctx->session, cat, *cat.find(id)));
+            nodes.push_back(cat.find(id));
+        }
+        if (options.sort != SortKey::Name || options.descending) {
+            std::sort(nodes.begin(), nodes.end(), [&options](const auto* a, const auto* b) {
+                return listedBefore(*a, *b, options);
+            });
+        }
+        out.total = nodes.size();
+        const auto [begin, end] = windowOf(nodes.size(), options);
+        out.entries.reserve(end - begin);
+        for (auto i = begin; i < end; ++i) {
+            out.entries.push_back(describeEntry(ctx->session, cat, *nodes[i]));
         }
         return out;
     }

@@ -219,9 +219,9 @@ TEST_CASE("any entry can be a parent: attachments, breadcrumbs, folder tree",
     // поиск видит вложенное и показывает путь через фото
     auto hits = f.services.search->search(f.lease(s), {.text = "x.txt"});
     REQUIRE(hits.has_value());
-    REQUIRE(hits->size() == 1);
-    REQUIRE((*hits)[0].path.size() == 3);
-    CHECK((*hits)[0].path[0].name == "photo.jpg");
+    REQUIRE(hits->hits.size() == 1);
+    REQUIRE(hits->hits[0].path.size() == 3);
+    CHECK(hits->hits[0].path[0].name == "photo.jpg");
 
     // все выживает после блокировки
     f.services.safe->lock();

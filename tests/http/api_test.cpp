@@ -410,6 +410,49 @@ TEST_CASE("entries endpoints speak the documented DTO", "[http][entries]") {
     CHECK(folder.json()["entries"][0]["hasThumbnail"] == false);
     CHECK(f.api("GET", "/api/v1/entries?parentId=abc").status == 400);
     CHECK(f.api("GET", "/api/v1/entries?parentId=77").status == 404);
+}
+
+TEST_CASE("entries listing takes sort, order and a window", "[http][entries][order]") {
+    HttpFixture f;
+    auto root = f.api("GET", "/api/v1/entries");
+    REQUIRE(root.status == 200);
+    CHECK(root.json()["total"] == 3);
+    const auto& options = f.fakes.entries->lastListOptions;
+    // по умолчанию: по имени, по возрастанию, все
+    CHECK(options.sort == app::SortKey::Name);
+    CHECK_FALSE(options.descending);
+    CHECK(options.offset == 0);
+    CHECK(options.limit == 0);
+
+    REQUIRE(
+        f.api("GET", "/api/v1/entries?parentId=1&sort=size&order=desc&offset=40&limit=20").status ==
+        200);
+    CHECK(options.sort == app::SortKey::Size);
+    CHECK(options.descending);
+    CHECK(options.offset == 40);
+    CHECK(options.limit == 20);
+    const std::pair<const char*, app::SortKey> keys[] = {{"name", app::SortKey::Name},
+                                                         {"added", app::SortKey::Added},
+                                                         {"modified", app::SortKey::Modified},
+                                                         {"date", app::SortKey::Date},
+                                                         {"size", app::SortKey::Size}};
+    for (const auto& [text, key] : keys) {
+        INFO(text);
+        REQUIRE(f.api("GET", std::string("/api/v1/entries?order=asc&sort=") + text).status == 200);
+        CHECK(options.sort == key);
+        CHECK_FALSE(options.descending);
+    }
+
+    f.fakes.entries->lastListOptions = {.offset = 777};
+    for (const char* bad :
+         {"sort=Name", "sort=title", "order=down", "order=DESC", "offset=-1", "offset=x",
+          "offset=1.5", "limit=0", "limit=-2", "limit=10abc", "limit=99999999999999999999999"}) {
+        INFO(bad);
+        auto refused = f.api("GET", std::string("/api/v1/entries?") + bad);
+        CHECK(refused.status == 400);
+        CHECK(refused.errorCode() == "bad_request");
+    }
+    CHECK(options.offset == 777); // до сервиса не дошло
 
     CHECK(f.api("GET", "/api/v1/entries/2").json()["name"] == "море.jpg");
     CHECK(f.api("GET", "/api/v1/entries/-5").status == 400);
@@ -589,10 +632,18 @@ TEST_CASE("search passes the query and returns hits with paths", "[http][search]
     auto r = f.api("GET", "/api/v1/search?q=%D0%BC%D0%BE%D1%80%D0%B5&limit=5");
     REQUIRE(r.status == 200);
     CHECK(f.fakes.search->lastQuery.text == "море");
-    CHECK(f.fakes.search->lastQuery.limit == 5);
+    CHECK(f.fakes.search->lastQuery.page.limit == 5);
     CHECK(r.json()["results"][0]["entry"]["name"] == "море.jpg");
     CHECK(r.json()["results"][0]["path"][0]["name"] == "Отпуск");
+    CHECK(r.json()["total"] == 1);
     CHECK(f.api("GET", "/api/v1/search?q=a&limit=zero").status == 400);
+
+    REQUIRE(f.api("GET", "/api/v1/search?q=a&sort=date&order=desc&offset=3").status == 200);
+    CHECK(f.fakes.search->lastQuery.page.sort == app::SortKey::Date);
+    CHECK(f.fakes.search->lastQuery.page.descending);
+    CHECK(f.fakes.search->lastQuery.page.offset == 3);
+    CHECK(f.fakes.search->lastQuery.page.limit == 0);
+    CHECK(f.api("GET", "/api/v1/search?q=a&sort=x").status == 400);
 }
 
 TEST_CASE("search takes tags, match mode and scope", "[http][search][UF-18]") {
@@ -604,7 +655,7 @@ TEST_CASE("search takes tags, match mode and scope", "[http][search][UF-18]") {
     CHECK(query.tags == std::vector<domain::TagId>{1, 2, 3});
     CHECK(query.match == app::TagMatch::Any);
     CHECK(query.within == 7);
-    CHECK(query.limit == 9);
+    CHECK(query.page.limit == 9);
     CHECK(r.json()["query"] == "a");
     CHECK(r.json()["results"].size() == 1);
 
@@ -613,7 +664,7 @@ TEST_CASE("search takes tags, match mode and scope", "[http][search][UF-18]") {
     CHECK(query.tags.empty());
     CHECK(query.match == app::TagMatch::Categories);
     CHECK_FALSE(query.within.has_value());
-    CHECK(query.limit == 0);
+    CHECK(query.page.limit == 0);
     // одни теги, без текста; запятая может прийти закодированной
     auto tagsOnly = f.api("GET", "/api/v1/search?tags=5%2C6&match=all");
     CHECK(tagsOnly.status == 200);

@@ -4,6 +4,7 @@
 #include <map>
 #include <unordered_set>
 
+#include "ordering.hpp"
 #include "safebox/domain/model/rules.hpp"
 #include "service_impls.hpp"
 #include "vault_session.hpp"
@@ -67,11 +68,10 @@ class SearchServiceImpl final : public SearchService {
 public:
     explicit SearchServiceImpl(Ports ports) : ports_(ports) {}
 
-    Result<std::vector<domain::SearchHit>> search(const Lease& lease,
-                                                  const SearchQuery& query) override {
+    Result<SearchResults> search(const Lease& lease, const SearchQuery& query) override {
         const auto needle = foldForSearch(domain::detail::trim(query.text));
         if (needle.empty() && query.tags.empty()) {
-            return std::vector<domain::SearchHit>{};
+            return SearchResults{};
         }
         auto ctx = contextOf(lease);
         if (!ctx) {
@@ -133,33 +133,26 @@ public:
             }
             matches.push_back(match);
         }
-        std::sort(matches.begin(), matches.end(), [](const Match& x, const Match& y) {
-            const auto& a = *x.node;
-            const auto& b = *y.node;
-            if (a.entry.isFolder() != b.entry.isFolder()) {
-                return a.entry.isFolder();
-            }
-            if (a.folded != b.folded) {
-                return a.folded < b.folded;
-            }
-            return a.entry.id < b.entry.id;
+        const auto& page = query.page;
+        std::sort(matches.begin(), matches.end(), [&page](const Match& x, const Match& y) {
+            return listedBefore(*x.node, *y.node, page);
         });
-        if (query.limit != 0 && matches.size() > query.limit) {
-            matches.resize(query.limit);
-        }
 
-        std::vector<domain::SearchHit> hits;
-        hits.reserve(matches.size());
-        for (const auto& match : matches) {
+        SearchResults out;
+        out.total = matches.size();
+        const auto [begin, end] = windowOf(matches.size(), page);
+        out.hits.reserve(end - begin);
+        for (auto i = begin; i < end; ++i) {
+            const auto& match = matches[i];
             domain::SearchHit hit;
             hit.entry = describeEntry(ctx->session, cat, *match.node);
             if (match.node->entry.parentId) {
                 hit.path = cat.pathTo(*match.node->entry.parentId);
             }
             hit.matchedIn = match.matchedIn;
-            hits.push_back(std::move(hit));
+            out.hits.push_back(std::move(hit));
         }
-        return hits;
+        return out;
     }
 
 private:

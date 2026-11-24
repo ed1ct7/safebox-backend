@@ -48,7 +48,7 @@ struct FilterVault {
     std::vector<domain::SearchHit> find(const app::SearchQuery& query) {
         auto hits = f.services.search->search(f.lease(s), query);
         REQUIRE(hits.has_value());
-        return *hits;
+        return hits->hits;
     }
 
     static Names namesOf(const std::vector<domain::SearchHit>& hits) {
@@ -204,10 +204,10 @@ TEST_CASE("an empty query finds nothing; an unknown tag is refused", "[search][t
 
 TEST_CASE("the limit applies after sorting", "[search][tags]") {
     FilterVault v;
-    auto two = v.find({.tags = {v.crimea}, .limit = 2});
+    auto two = v.find({.tags = {v.crimea}, .page = {.limit = 2}});
     CHECK(v.namesOf(two) == Names{"Море", "Отпуск"});            // папки первыми
-    CHECK(v.find({.tags = {v.crimea}, .limit = 0}).size() == 5); // 0 - без ограничения
-    CHECK(v.find({.tags = {v.crimea}, .limit = 5000}).size() == 5);
+    CHECK(v.find({.tags = {v.crimea}, .page = {.limit = 0}}).size() == 5); // 0 - без ограничения
+    CHECK(v.find({.tags = {v.crimea}, .page = {.limit = 5000}}).size() == 5);
 }
 
 TEST_CASE("the filter sees the tags after the safe is reopened", "[search][tags][UF-18]") {
@@ -218,6 +218,6 @@ TEST_CASE("the filter sees the tags after the safe is reopened", "[search][tags]
     auto hits = v.f.services.search->search(v.f.lease(*again),
                                             {.tags = {v.anna, v.ru}, .match = TagMatch::All});
     REQUIRE(hits.has_value());
-    REQUIRE(hits->size() == 1);
-    CHECK((*hits)[0].entry.name == "план.txt");
+    REQUIRE(hits->hits.size() == 1);
+    CHECK(hits->hits[0].entry.name == "план.txt");
 }

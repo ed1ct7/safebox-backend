@@ -78,12 +78,35 @@ public:
     virtual void tick() noexcept = 0;
 };
 
+// Порядок и окно выдачи (список записи, поиск)
+
+// Name - имя без учета регистра, числа в имени - по значению ("2" раньше "10");
+// Added - createdAt; Modified - modifiedAt; Date - sourceDate, иначе sourceModifiedAt, иначе
+// createdAt; Size - size.
+enum class SortKey {
+    Name,
+    Added,
+    Modified,
+    Date,
+    Size,
+};
+
+// Папки всегда первыми; descending переворачивает только ключ, равные по ключу - по имени
+// по возрастанию, затем по id. Окно [offset, offset + limit); limit = 0 - до конца.
+struct ListOptions {
+    SortKey sort = SortKey::Name;
+    bool descending = false;
+    std::size_t offset = 0;
+    std::size_t limit = 0;
+};
+
 // EntriesService
 
 struct FolderListing {
     std::optional<domain::Entry> parent; // nullopt - корень "Все объекты"; иначе любая запись
     std::vector<domain::PathItem> path;  // крошки от корня до parent включительно
-    std::vector<domain::Entry> entries;  // папки первыми, затем по имени
+    std::vector<domain::Entry> entries;  // окно выдачи в порядке ListOptions
+    std::size_t total = 0;               // детей всего, без учета окна
 };
 
 struct FolderNode {
@@ -131,8 +154,13 @@ public:
     virtual ~EntriesService() = default;
 
     // parent - любая запись (у файла бывают вложения); нет такой -> NotFound.
-    [[nodiscard]] virtual Result<FolderListing> list(const Lease& lease,
-                                                     std::optional<domain::EntryId> parent) = 0;
+    [[nodiscard]] virtual Result<FolderListing>
+    list(const Lease& lease, std::optional<domain::EntryId> parent, const ListOptions& options) = 0;
+    // Все дети, папки первыми, затем по имени.
+    [[nodiscard]] Result<FolderListing> list(const Lease& lease,
+                                             std::optional<domain::EntryId> parent) {
+        return list(lease, parent, ListOptions{});
+    }
     [[nodiscard]] virtual Result<domain::Entry> get(const Lease& lease, domain::EntryId id) = 0;
     // Папки, у которых все предки тоже папки: родители раньше детей, соседи по имени (дерево
     // слева).
@@ -337,7 +365,12 @@ struct SearchQuery {
     std::vector<domain::TagId> tags;
     TagMatch match = TagMatch::Categories;
     std::optional<domain::EntryId> within; // только потомки этой записи, ее самой в выдаче нет
-    std::size_t limit = 0;                 // 0 - без ограничения
+    ListOptions page;                      // по умолчанию - все совпадения по имени
+};
+
+struct SearchResults {
+    std::vector<domain::SearchHit> hits; // окно выдачи
+    std::size_t total = 0;               // совпадений всего, без учета окна
 };
 
 class SearchService {
@@ -345,10 +378,10 @@ public:
     virtual ~SearchService() = default;
 
     // Текст - без учета регистра (кириллица включительно, "ё" = "е") в имени, иначе в описании;
-    // теги - по прямым и унаследованным. Пусто и то и другое -> []. limit = 0 - выдать все
-    // совпадения. Неизвестный тег -> InvalidArgument, неизвестный within -> NotFound.
-    [[nodiscard]] virtual Result<std::vector<domain::SearchHit>>
-    search(const Lease& lease, const SearchQuery& query) = 0;
+    // теги - по прямым и унаследованным. Пусто и то и другое -> []. Неизвестный тег ->
+    // InvalidArgument, неизвестный within -> NotFound.
+    [[nodiscard]] virtual Result<SearchResults> search(const Lease& lease,
+                                                       const SearchQuery& query) = 0;
 };
 
 // LinksService

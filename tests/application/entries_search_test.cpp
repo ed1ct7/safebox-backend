@@ -124,46 +124,46 @@ TEST_CASE("search finds names anywhere, case-insensitively", "[search][UF-8]") {
 
     auto hits = f.services.search->search(f.lease(s), {.text = "ёлка на пляже"});
     REQUIRE(hits.has_value());
-    REQUIRE(hits->size() == 1);
-    CHECK((*hits)[0].entry.name == "Ёлка на ПЛЯЖЕ.jpg");
-    REQUIRE((*hits)[0].path.size() == 2);
-    CHECK((*hits)[0].path[0].name == "Отпуск");
-    CHECK((*hits)[0].path[1].name == "Море");
+    REQUIRE(hits->hits.size() == 1);
+    CHECK(hits->hits[0].entry.name == "Ёлка на ПЛЯЖЕ.jpg");
+    REQUIRE(hits->hits[0].path.size() == 2);
+    CHECK(hits->hits[0].path[0].name == "Отпуск");
+    CHECK(hits->hits[0].path[1].name == "Море");
 
     auto yo = f.services.search->search(f.lease(s), {.text = "ЕЛКА"}); // "е" находит "ё"
     REQUIRE(yo.has_value());
-    CHECK(yo->size() == 1);
+    CHECK(yo->hits.size() == 1);
 
     auto latin = f.services.search->search(f.lease(s), {.text = "report.pdf"});
     REQUIRE(latin.has_value());
-    REQUIRE(latin->size() == 1);
-    CHECK((*latin)[0].entry.meta.mime == "application/pdf");
+    REQUIRE(latin->hits.size() == 1);
+    CHECK(latin->hits[0].entry.meta.mime == "application/pdf");
 
     // латинская: Work, Report.PDF, notes.txt
     auto folders = f.services.search->search(f.lease(s), {.text = "o"});
     REQUIRE(folders.has_value());
-    REQUIRE(folders->size() == 3);
-    CHECK((*folders)[0].entry.name == "Work"); // папки первыми
+    REQUIRE(folders->hits.size() == 3);
+    CHECK(folders->hits[0].entry.name == "Work"); // папки первыми
 
-    auto limited = f.services.search->search(f.lease(s), {.text = "t", .limit = 2});
+    auto limited = f.services.search->search(f.lease(s), {.text = "t", .page = {.limit = 2}});
     REQUIRE(limited.has_value());
-    CHECK(limited->size() == 2);
+    CHECK(limited->hits.size() == 2);
 
     auto blank = f.services.search->search(f.lease(s), {.text = "   "});
     REQUIRE(blank.has_value());
-    CHECK(blank->empty());
+    CHECK(blank->hits.empty());
 
     // кэш имен обновляется после импорта и переименования
     REQUIRE(f.importFiles(s, {{"new.txt", "z"}}).imported == 1);
     auto fresh = f.services.search->search(f.lease(s), {.text = "new"});
     REQUIRE(fresh.has_value());
-    CHECK(fresh->size() == 1);
+    CHECK(fresh->hits.size() == 1);
     REQUIRE(f.services.entries
                 ->update(f.lease(s), f.entryNamed(s, "new.txt").id, {.name = "renamed.txt"})
                 .has_value());
     auto stale = f.services.search->search(f.lease(s), {.text = "new"});
     REQUIRE(stale.has_value());
-    CHECK(stale->empty());
+    CHECK(stale->hits.empty());
 }
 
 TEST_CASE("search without limit returns every match", "[search][UF-8]") {
@@ -178,11 +178,72 @@ TEST_CASE("search without limit returns every match", "[search][UF-8]") {
 
     auto all = f.services.search->search(f.lease(s), {.text = "bulk"});
     REQUIRE(all.has_value());
-    CHECK(all->size() == 250);
+    CHECK(all->hits.size() == 250);
 
-    auto trimmed = f.services.search->search(f.lease(s), {.text = "bulk", .limit = 200});
+    auto trimmed = f.services.search->search(f.lease(s), {.text = "bulk", .page = {.limit = 200}});
     REQUIRE(trimmed.has_value());
-    CHECK(trimmed->size() == 200);
+    CHECK(trimmed->hits.size() == 200);
+    CHECK(trimmed->total == 250);
+    CHECK(trimmed->hits[2].entry.name == "bulk2.txt"); // числа в имени - по значению
+    CHECK(trimmed->hits[10].entry.name == "bulk10.txt");
+
+    auto tail = f.services.search->search(
+        f.lease(s), {.text = "bulk", .page = {.descending = true, .offset = 240, .limit = 20}});
+    REQUIRE(tail.has_value());
+    CHECK(tail->total == 250);
+    REQUIRE(tail->hits.size() == 10);
+    CHECK(tail->hits.front().entry.name == "bulk9.txt");
+    CHECK(tail->hits.back().entry.name == "bulk0.txt");
+
+    auto past = f.services.search->search(f.lease(s), {.text = "bulk", .page = {.offset = 900}});
+    REQUIRE(past.has_value());
+    CHECK(past->hits.empty());
+    CHECK(past->total == 250);
+}
+
+TEST_CASE("list pages and sorts by a key, folders first", "[entries][order]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    auto at = [](std::int64_t ms) { return app::ImportFileOptions{.sourceModifiedAt = ms}; };
+    REQUIRE(f.importFiles(s, {{"img10.jpg", "1234", at(3000)},
+                              {"img2.jpg", "1", at(1000)},
+                              {"img1.jpg", "12", at(2000)},
+                              {"Альбом 10/a.txt", "a"},
+                              {"Альбом 9/b.txt", "b"}})
+                .imported == 5);
+
+    auto names = [](const app::FolderListing& listing) {
+        std::vector<std::string> out;
+        for (const auto& e : listing.entries) {
+            out.push_back(e.name);
+        }
+        return out;
+    };
+    using Names = std::vector<std::string>;
+    auto list = [&](app::ListOptions options) {
+        auto listing = f.services.entries->list(f.lease(s), std::nullopt, options);
+        REQUIRE(listing.has_value());
+        CHECK(listing->total == 5);
+        return names(*listing);
+    };
+    CHECK(list({}) == Names{"Альбом 9", "Альбом 10", "img1.jpg", "img2.jpg", "img10.jpg"});
+    CHECK(list({.descending = true}) ==
+          Names{"Альбом 10", "Альбом 9", "img10.jpg", "img2.jpg", "img1.jpg"});
+    CHECK(list({.sort = app::SortKey::Size, .descending = true}) ==
+          Names{"Альбом 9", "Альбом 10", "img10.jpg", "img1.jpg", "img2.jpg"});
+    // дата без sourceDate - время изменения исходного файла (папки - по времени импорта, оно
+    // у них почти одно, поэтому смотрим только файлы)
+    CHECK(list({.sort = app::SortKey::Date, .offset = 2}) ==
+          Names{"img2.jpg", "img1.jpg", "img10.jpg"});
+    CHECK(list({.sort = app::SortKey::Date, .offset = 2, .limit = 2}) ==
+          Names{"img2.jpg", "img1.jpg"});
+    CHECK(list({.offset = 4, .limit = 10}) == Names{"img10.jpg"});
+    CHECK(list({.offset = 5}).empty());
+
+    auto unchanged = f.services.entries->list(f.lease(s), std::nullopt); // без окна - все
+    REQUIRE(unchanged.has_value());
+    CHECK(unchanged->entries.size() == 5);
+    CHECK(unchanged->total == 5);
 }
 
 TEST_CASE("services refuse to work after lock", "[entries][UF-13]") {

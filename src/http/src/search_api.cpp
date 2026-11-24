@@ -1,7 +1,5 @@
-// GET /api/v1/search?q=&tags=1,2,3&match=categories|all|any&within=<id>&limit=
-// Без limit выдаются все совпадения; limit, если задан, должен быть >= 1.
-#include <charconv>
-
+// GET /api/v1/search?q=&tags=1,2,3&match=categories|all|any&within=<id>&sort=&order=&offset=&limit=
+// Без limit выдаются все совпадения; total - сколько их всего.
 #include "dto.hpp"
 
 namespace safebox::http {
@@ -39,13 +37,8 @@ void registerSearchApi(httplib::Server& server, ApiContext& ctx) {
         }
         app::SearchQuery query;
         query.text = req.get_param_value("q");
-        if (const auto text = req.get_param_value("limit"); !text.empty()) {
-            const auto [ptr, ec] =
-                std::from_chars(text.data(), text.data() + text.size(), query.limit);
-            if (ec != std::errc{} || ptr != text.data() + text.size() || query.limit == 0) {
-                sendError(res, 400, "bad_request", "Некорректный параметр limit");
-                return;
-            }
+        if (!readListOptions(req, query.page, res)) {
+            return;
         }
         if (!readTags(req.get_param_value("tags"), query.tags, res)) {
             return;
@@ -69,16 +62,18 @@ void registerSearchApi(httplib::Server& server, ApiContext& ctx) {
                 return;
             }
         }
-        auto hits = ctx.services.search->search(*lease, query);
-        if (!hits) {
-            sendError(res, hits.error());
+        auto found = ctx.services.search->search(*lease, query);
+        if (!found) {
+            sendError(res, found.error());
             return;
         }
         Json results = Json::array();
-        for (const auto& hit : *hits) {
+        for (const auto& hit : found->hits) {
             results.push_back(toJson(hit));
         }
-        sendJson(res, Json{{"query", query.text}, {"results", std::move(results)}});
+        sendJson(
+            res,
+            Json{{"query", query.text}, {"results", std::move(results)}, {"total", found->total}});
     });
 }
 

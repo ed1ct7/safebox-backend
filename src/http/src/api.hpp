@@ -87,6 +87,10 @@ void replaceHeader(httplib::Response& res, const std::string& key, const std::st
 [[nodiscard]] bool readOptionalString(const Json& body, const char* field,
                                       std::optional<std::string>& value, httplib::Response& res);
 [[nodiscard]] std::optional<domain::EntryId> parseId(std::string_view text) noexcept;
+// Параметры порядка и окна выдачи: sort=name|added|modified|date|size, order=asc|desc,
+// offset >= 0, limit >= 1. Нет параметра - значение по умолчанию; иначе 400 уже отправлен.
+[[nodiscard]] bool readListOptions(const httplib::Request& req, app::ListOptions& options,
+                                   httplib::Response& res);
 // "keepBoth" | "replace" | "skip"
 [[nodiscard]] std::optional<app::ConflictPolicy>
 parseConflictPolicy(std::string_view text) noexcept;

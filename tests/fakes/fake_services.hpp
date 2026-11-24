@@ -114,8 +114,11 @@ public:
         entries[1].childCount = 1;
     }
 
-    app::Result<app::FolderListing> list(const app::Lease&,
-                                         std::optional<domain::EntryId> parent) override {
+    using app::EntriesService::list;
+
+    app::Result<app::FolderListing> list(const app::Lease&, std::optional<domain::EntryId> parent,
+                                         const app::ListOptions& options) override {
+        lastListOptions = options;
         app::FolderListing out;
         if (parent) {
             auto it = entries.find(*parent);
@@ -130,6 +133,7 @@ public:
                 out.entries.push_back(e);
             }
         }
+        out.total = out.entries.size();
         return out;
     }
 
@@ -203,6 +207,7 @@ public:
     std::optional<app::UpdateEntryCmd> lastUpdate;
     std::vector<domain::EntryId> lastPlanIds;
     std::optional<domain::EntryId> lastPlanParent;
+    app::ListOptions lastListOptions;
     std::optional<app::MoveCmd> lastMove;
     std::vector<app::MoveConflict> conflicts;
     app::MoveResult moveResult{1, 0, 0};
@@ -304,8 +309,8 @@ public:
 
 class FakeSearchService final : public app::SearchService {
 public:
-    app::Result<std::vector<domain::SearchHit>> search(const app::Lease&,
-                                                       const app::SearchQuery& query) override {
+    app::Result<app::SearchResults> search(const app::Lease&,
+                                           const app::SearchQuery& query) override {
         lastQuery = query;
         if (error) {
             return std::unexpected(*error);
@@ -314,7 +319,7 @@ public:
         hit.entry = makeEntry(2, 1, domain::Kind::Photo, "море.jpg");
         hit.path = {{1, "Отпуск"}};
         hit.matchedIn = matchedIn;
-        return std::vector<domain::SearchHit>{hit};
+        return app::SearchResults{{hit}, 1};
     }
 
     domain::MatchedIn matchedIn = domain::MatchedIn::None;

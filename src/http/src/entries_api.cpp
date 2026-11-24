@@ -140,7 +140,11 @@ void registerEntriesApi(httplib::Server& server, ApiContext& ctx) {
                 return;
             }
         }
-        auto listing = ctx.services.entries->list(*lease, parent);
+        app::ListOptions options;
+        if (!readListOptions(req, options, res)) {
+            return;
+        }
+        auto listing = ctx.services.entries->list(*lease, parent, options);
         if (!listing) {
             sendError(res, listing.error());
             return;

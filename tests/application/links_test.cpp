@@ -499,8 +499,8 @@ TEST_CASE("the worker fills in name, description and thumbnail", "[links][previe
     CHECK(listing->entries.at(0).previewPending);
     auto hits = f.services.search->search(f.lease(s), {.text = "example"});
     REQUIRE(hits.has_value());
-    REQUIRE(hits->size() == 1);
-    CHECK(hits->at(0).entry.previewPending);
+    REQUIRE(hits->hits.size() == 1);
+    CHECK(hits->hits.at(0).entry.previewPending);
 
     gate.open();
     f.services.links->drain();

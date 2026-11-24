@@ -9,6 +9,7 @@ add_library(safebox-application STATIC
     src/import_export.cpp
     src/search_service.cpp
     src/tags_service.cpp
+    src/ordering.cpp
     src/path_folders.cpp
     src/links_service.cpp
     src/content_hashes.cpp

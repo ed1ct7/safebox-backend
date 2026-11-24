@@ -11,6 +11,7 @@
 #include <string>
 #include <unordered_set>
 
+#include "ordering.hpp"
 #include "safebox/domain/model/rules.hpp"
 #include "safebox/infra/factories.hpp"
 #include "sealing.hpp"
@@ -68,6 +69,101 @@ TEST_CASE("any entry can have children; folders first, then by folded name", "[c
     CHECK(described.childCount == 3);
     CHECK(described.name == "Закат.jpg");
     CHECK(catalog.find(1)->entry.childCount == 0); // внутри каталога счетчик отдельно
+}
+
+TEST_CASE("names compare numbers by value, the rest by bytes", "[catalog][order]") {
+    CHECK(compareNames("photo_2.jpg", "photo_10.jpg") < 0);
+    CHECK(compareNames("photo_10.jpg", "photo_2.jpg") > 0);
+    CHECK(compareNames("img9", "img0010") < 0); // ведущие нули не в счет
+    CHECK(compareNames("a1b2", "a1b10") < 0);   // каждая серия цифр - отдельно
+    CHECK(compareNames("99999999999999999999x", "100000000000000000000x") < 0); // без переполнения
+    CHECK(compareNames("7", "007") != 0); // равны по значению, но не одно имя
+    CHECK((compareNames("7", "007") < 0) == (std::string("7") < std::string("007")));
+    CHECK(compareNames("file", "file1") < 0);
+    CHECK(compareNames("file1", "file") > 0);
+    CHECK(compareNames("same", "same") == 0);
+    CHECK(compareNames("a 1", "a1") < 0); // пробел (0x20) раньше цифры
+    CHECK(compareNames("1", "a") < 0);
+    CHECK(compareNames("я2", "я10") < 0); // кириллица - побайтно, цифры - числом
+
+    // строгий порядок на смешанном наборе: sort не ломается и дает одно и то же
+    std::vector<std::string> names{"x10", "x9", "x009", "x9a", "x",    "x 9",   "x0",
+                                   "x00", "10", "9",    "y",   "x9.5", "x9.10", "X"};
+    auto sorted = names;
+    std::sort(sorted.begin(), sorted.end(),
+              [](const auto& a, const auto& b) { return compareNames(a, b) < 0; });
+    for (std::size_t i = 0; i < sorted.size(); ++i) {
+        for (std::size_t j = 0; j < sorted.size(); ++j) {
+            const int c = compareNames(sorted[i], sorted[j]);
+            INFO(sorted[i] << " vs " << sorted[j]);
+            CHECK((i < j ? c < 0 : (i == j ? c == 0 : c > 0)));
+        }
+    }
+}
+
+TEST_CASE("children are listed in natural name order", "[catalog][order]") {
+    Catalog catalog;
+    catalog.add(entry(1, std::nullopt, domain::Kind::Photo, "photo_10.jpg"));
+    catalog.add(entry(2, std::nullopt, domain::Kind::Photo, "photo_2.jpg"));
+    catalog.add(entry(3, std::nullopt, domain::Kind::Photo, "Photo_1.jpg"));
+    catalog.add(entry(4, std::nullopt, domain::Kind::Folder, "Том 12"));
+    catalog.add(entry(5, std::nullopt, domain::Kind::Folder, "том 3"));
+    catalog.finalize();
+    CHECK(children(catalog, std::nullopt) == Ids{5, 4, 3, 2, 1});
+}
+
+TEST_CASE("list order: folders first, then the key, then the name", "[catalog][order]") {
+    Catalog catalog;
+    auto add = [&catalog](domain::EntryId id, domain::Kind kind, std::string name,
+                          std::uint64_t size, std::int64_t created, std::int64_t modified,
+                          std::optional<std::int64_t> sourceModified,
+                          std::optional<std::int64_t> sourceDate) {
+        auto e = entry(id, std::nullopt, kind, std::move(name));
+        e.meta.size = size;
+        e.meta.createdAt = created;
+        e.meta.modifiedAt = modified;
+        e.meta.sourceModifiedAt = sourceModified;
+        e.meta.sourceDate = sourceDate;
+        catalog.add(e);
+    };
+    add(1, domain::Kind::File, "c.txt", 30, 100, 900, std::nullopt, std::nullopt);
+    add(2, domain::Kind::File, "a.txt", 10, 300, 700, 50, std::nullopt);
+    add(3, domain::Kind::File, "b.txt", 30, 200, 800, 60, 5);
+    add(4, domain::Kind::Folder, "zz", 0, 50, 50, std::nullopt, std::nullopt);
+    add(5, domain::Kind::Folder, "aa", 0, 60, 40, std::nullopt, std::nullopt);
+    catalog.finalize();
+
+    auto order = [&catalog](SortKey key, bool descending) {
+        Ids ids{1, 2, 3, 4, 5};
+        const ListOptions options{.sort = key, .descending = descending};
+        std::sort(ids.begin(), ids.end(), [&](auto a, auto b) {
+            return listedBefore(*catalog.find(a), *catalog.find(b), options);
+        });
+        return ids;
+    };
+    CHECK(order(SortKey::Name, false) == Ids{5, 4, 2, 3, 1});
+    CHECK(order(SortKey::Name, true) == Ids{4, 5, 1, 3, 2}); // папки все равно первыми
+    CHECK(order(SortKey::Added, false) == Ids{4, 5, 1, 3, 2});
+    CHECK(order(SortKey::Added, true) == Ids{5, 4, 2, 3, 1});
+    CHECK(order(SortKey::Modified, false) == Ids{5, 4, 2, 3, 1});
+    // Date: sourceDate (b=5), иначе sourceModifiedAt (a=50), иначе createdAt (c=100)
+    CHECK(order(SortKey::Date, false) == Ids{4, 5, 3, 2, 1});
+    CHECK(order(SortKey::Date, true) == Ids{5, 4, 1, 2, 3});
+    // Size: b и c равны - по имени по возрастанию в обоих направлениях
+    CHECK(order(SortKey::Size, false) == Ids{5, 4, 2, 3, 1});
+    CHECK(order(SortKey::Size, true) == Ids{5, 4, 3, 1, 2});
+}
+
+TEST_CASE("the window clamps offset and limit to the list", "[catalog][order]") {
+    using W = std::pair<std::size_t, std::size_t>;
+    CHECK(windowOf(10, {}) == W{0, 10});
+    CHECK(windowOf(10, {.offset = 3}) == W{3, 10});
+    CHECK(windowOf(10, {.offset = 3, .limit = 4}) == W{3, 7});
+    CHECK(windowOf(10, {.offset = 8, .limit = 4}) == W{8, 10});
+    CHECK(windowOf(10, {.offset = 10, .limit = 4}) == W{10, 10});
+    CHECK(windowOf(10, {.offset = 99}) == W{10, 10});
+    CHECK(windowOf(0, {.limit = 5}) == W{0, 0});
+    CHECK(windowOf(10, {.offset = SIZE_MAX, .limit = SIZE_MAX}) == W{10, 10});
 }
 
 TEST_CASE("nodes keep folded names and descriptions", "[catalog]") {

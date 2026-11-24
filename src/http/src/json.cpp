@@ -56,6 +56,76 @@ std::optional<domain::EntryId> parseId(std::string_view text) noexcept {
     return id;
 }
 
+namespace {
+
+// Неотрицательное целое целиком; иначе nullopt.
+[[nodiscard]] std::optional<std::size_t> parseCount(std::string_view text) noexcept {
+    std::size_t value = 0;
+    const auto* end = text.data() + text.size();
+    const auto [ptr, ec] = std::from_chars(text.data(), end, value);
+    if (text.empty() || ec != std::errc{} || ptr != end) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+[[nodiscard]] std::optional<app::SortKey> parseSortKey(std::string_view text) noexcept {
+    if (text == "name") {
+        return app::SortKey::Name;
+    }
+    if (text == "added") {
+        return app::SortKey::Added;
+    }
+    if (text == "modified") {
+        return app::SortKey::Modified;
+    }
+    if (text == "date") {
+        return app::SortKey::Date;
+    }
+    if (text == "size") {
+        return app::SortKey::Size;
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
+bool readListOptions(const httplib::Request& req, app::ListOptions& options,
+                     httplib::Response& res) {
+    if (const auto text = req.get_param_value("sort"); !text.empty()) {
+        const auto key = parseSortKey(text);
+        if (!key) {
+            sendError(res, 400, "bad_request", "Некорректный параметр sort");
+            return false;
+        }
+        options.sort = *key;
+    }
+    if (const auto text = req.get_param_value("order"); !text.empty()) {
+        if (text != "asc" && text != "desc") {
+            sendError(res, 400, "bad_request", "Некорректный параметр order");
+            return false;
+        }
+        options.descending = text == "desc";
+    }
+    if (const auto text = req.get_param_value("offset"); !text.empty()) {
+        const auto offset = parseCount(text);
+        if (!offset) {
+            sendError(res, 400, "bad_request", "Некорректный параметр offset");
+            return false;
+        }
+        options.offset = *offset;
+    }
+    if (const auto text = req.get_param_value("limit"); !text.empty()) {
+        const auto limit = parseCount(text);
+        if (!limit || *limit == 0) {
+            sendError(res, 400, "bad_request", "Некорректный параметр limit");
+            return false;
+        }
+        options.limit = *limit;
+    }
+    return true;
+}
+
 std::optional<app::ConflictPolicy> parseConflictPolicy(std::string_view text) noexcept {
     if (text == "keepBoth") {
         return app::ConflictPolicy::KeepBoth;
@@ -172,6 +242,7 @@ Json toJson(const app::FolderListing& listing) {
         {"parent", listing.parent ? toJson(*listing.parent) : Json(nullptr)},
         {"path", toJson(listing.path)},
         {"entries", std::move(entries)},
+        {"total", listing.total},
     };
 }
 

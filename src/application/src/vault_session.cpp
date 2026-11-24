@@ -8,6 +8,7 @@
 #include <cstring>
 #include <unordered_set>
 
+#include "ordering.hpp"
 #include "safebox/domain/model/rules.hpp"
 
 namespace safebox::app {
@@ -266,15 +267,7 @@ void Catalog::finalize() {
 }
 
 bool Catalog::before(EntryId a, EntryId b) const {
-    const auto& na = *nodes_.at(a);
-    const auto& nb = *nodes_.at(b);
-    if (na.entry.isFolder() != nb.entry.isFolder()) {
-        return na.entry.isFolder();
-    }
-    if (na.folded != nb.folded) {
-        return na.folded < nb.folded;
-    }
-    return a < b;
+    return listedBefore(*nodes_.at(a), *nodes_.at(b), ListOptions{});
 }
 
 std::vector<EntryId>* Catalog::placeOf(const Node& node, bool create) {
