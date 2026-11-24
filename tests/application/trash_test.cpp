@@ -188,6 +188,32 @@ TEST_CASE("an entry trashed before its folder waits for the folder to come back"
     CHECK(rootNames(f, s, folder.id) == std::vector<std::string>{"inner.txt", "other.txt"});
 }
 
+TEST_CASE("a folder and what was trashed inside it earlier come back in one request", "[trash]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    REQUIRE(f.importFiles(s, {{"G/F/inner.txt", "i"}, {"G/F/other.txt", "o"}}).imported == 2);
+    const auto top = f.entryNamed(s, "G");
+    const auto folder = f.entryNamed(s, "F", top.id);
+    const auto inner = f.entryNamed(s, "inner.txt", folder.id);
+    CHECK(removeIds(f, s, {inner.id}) == 1);
+    CHECK(removeIds(f, s, {folder.id}) == 2);
+    CHECK(removeIds(f, s, {top.id}) == 1);
+
+    const domain::EntryId withoutTop[] = {inner.id, folder.id}; // G еще в корзине
+    auto refused = f.services.trash->restore(f.lease(s), withoutTop);
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code == Code::InvalidArgument);
+
+    const domain::EntryId all[] = {inner.id, folder.id, top.id}; // внутренний первым
+    auto restored = f.services.trash->restore(f.lease(s), all);
+    REQUIRE(restored.has_value());
+    CHECK(restored->restored == 3);
+    CHECK(restored->renamed.empty());
+    CHECK(trashIds(f, s).empty());
+    CHECK(rootNames(f, s) == std::vector<std::string>{"G"});
+    CHECK(rootNames(f, s, folder.id) == std::vector<std::string>{"inner.txt", "other.txt"});
+}
+
 TEST_CASE("purging a folder takes the entries trashed inside it too", "[trash]") {
     AppFixture f;
     auto s = f.createSafe();

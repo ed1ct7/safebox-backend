@@ -16,6 +16,24 @@ using domain::EntryId;
 using domain::Error;
 using domain::fail;
 
+// Корень корзины над parent, которого нет в этом же запросе: он не дает восстановить запись.
+// Корни из запроса восстанавливаются вместе с ней. Цикл в parent_id (битый сейф) - стоп.
+const Catalog::Node* trashedAbove(const Catalog& cat, std::optional<EntryId> parent,
+                                  const std::unordered_set<EntryId>& requested) {
+    std::unordered_set<EntryId> walked;
+    while (parent && walked.insert(*parent).second) {
+        const auto* node = cat.find(*parent);
+        if (node == nullptr) {
+            return nullptr;
+        }
+        if (node->entry.meta.trashedAt && !requested.contains(node->entry.id)) {
+            return node;
+        }
+        parent = node->entry.parentId;
+    }
+    return nullptr;
+}
+
 class TrashServiceImpl final : public TrashService {
 public:
     explicit TrashServiceImpl(Ports ports) : ports_(ports) {}
@@ -72,6 +90,7 @@ public:
             std::optional<std::string> rename;
         };
         std::vector<Step> steps;
+        const std::unordered_set<EntryId> requested(ids.begin(), ids.end());
         std::unordered_set<EntryId> seen;
         // занятые имена у каждого родителя: живые дети и уже восстановленные этим запросом
         std::map<std::optional<EntryId>, std::unordered_set<std::string>> taken;
@@ -87,9 +106,9 @@ public:
             if (parent && cat.find(*parent) == nullptr) {
                 parent.reset(); // сирота покажется в корне - там и проверяем имя
             }
-            if (parent && cat.inTrash(*parent)) {
+            if (const auto* blocker = trashedAbove(cat, parent, requested)) {
                 return fail(Error::Code::InvalidArgument,
-                            "Папка «" + cat.find(*parent)->entry.name +
+                            "Папка «" + blocker->entry.name +
                                 "» в корзине: сначала восстановите ее");
             }
             auto [names, fresh] = taken.try_emplace(parent);

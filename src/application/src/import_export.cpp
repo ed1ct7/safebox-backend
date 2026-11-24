@@ -264,7 +264,8 @@ public:
             wipeCurrent();
         }
         // Принятые целиком файлы сохраняются и при оборванном запросе или блокировке: аренда
-        // еще держится, lock ждет ее (пачка - доли секунды).
+        // еще держится, lock ждет ее. Не дождался (пачка с миниатюрами дольше срока) - сессия
+        // уже стерта, writeBatch это видит и ничего не пишет.
         try {
             (void)flushBatch();
         } catch (...) {
@@ -444,7 +445,10 @@ private:
         if (occupant == nullptr) {
             return {};
         }
-        if (policy == ConflictPolicy::Replace && !occupant->isFolder && occupant->id == 0) {
+        // Пачка пишется позже большого файла: замена той же записи из пачки - сначала она,
+        // иначе запрос закончится более ранним содержимым.
+        if (policy == ConflictPolicy::Replace && !occupant->isFolder &&
+            (occupant->id == 0 || replaced_.contains(occupant->id))) {
             if (auto st = flushBatch(); !st) {
                 return st;
             }
@@ -469,8 +473,8 @@ private:
 
     // Повтор содержимого: раньше в этом импорте (в том числе в пачке) или в каталоге.
     Status checkDuplicate(CurrentFile& file) {
-        if (file.onDuplicate != DuplicatePolicy::Skip) {
-            return {};
+        if (file.onDuplicate != DuplicatePolicy::Skip || (!file.writer && buffer_.empty())) {
+            return {}; // пустые файлы не повторы: у всех один хеш, а имя и есть содержимое
         }
         const auto& hash = *file.content.sha256;
         if (queuedSha_.contains(hash)) {
@@ -513,6 +517,7 @@ private:
         item.content.size = item.data.size();
         if (item.content.replaces) {
             replaced_.insert(*item.content.replaces); // старое содержимое уже не повтор
+            forgetContentOf(*item.content.replaces);
         } else {
             paths_.siblingsOf(item.content.parent)
                 .add(foldForSearch(item.content.name), {0, false});
@@ -594,6 +599,9 @@ private:
         if (!uow) {
             return std::unexpected(uow.error());
         }
+        if (auto st = ownStore(); !st) {
+            return st;
+        }
         const auto now = domain::toUnixMillis(ports_.clock.now());
         for (auto& item : batch_) {
             auto blob = storeBlob(**uow, KeyPurpose::Content, item.data);
@@ -648,9 +656,23 @@ private:
         return *id;
     }
 
+    // Транзакция открыта: если lock не дождался аренды, сессия стерта, а хранилище закрыто
+    // или открыто уже на другом сейфе. Открытая транзакция держит соединение - close() ждет ее.
+    Status ownStore() const {
+        if (session_.sealer() == nullptr) {
+            return fail(Error::Code::Locked, "Сейф заблокирован: файлы не записаны");
+        }
+        return {};
+    }
+
     // Запись есть в хранилище: следующие файлы с этим именем и содержимым видят ее.
     void noteCommitted(const Content& content, EntryId id) {
-        seen_.emplace(*content.sha256, id);
+        if (content.replaces) {
+            forgetContentOf(id);
+        }
+        if (seen_.emplace(*content.sha256, id).second) {
+            hashOf_.emplace(id, *content.sha256);
+        }
         if (content.replaces) {
             replaced_.insert(id);
         } else {
@@ -658,9 +680,25 @@ private:
         }
     }
 
+    // Запись получает другое содержимое: ее прежний хеш из этого импорта уже не повтор.
+    void forgetContentOf(EntryId id) {
+        const auto it = hashOf_.find(id);
+        if (it == hashOf_.end()) {
+            return;
+        }
+        if (const auto old = seen_.find(it->second); old != seen_.end() && old->second == id) {
+            seen_.erase(old);
+        }
+        hashOf_.erase(it);
+    }
+
     // Большой файл: запечатать и записать текущий кусок; тип файла - по первому куску.
     Status flushChunk(bool last) {
         auto& file = *current_;
+        if (auto st = ownStore(); !st) { // куски пишутся вне транзакции: сейф должен быть тот же
+            failCurrent(st.error().message);
+            return st;
+        }
         if (!file.writer) {
             sniff(file.content, buffer_);
             file.collectThumb = file.content.kind == Kind::Photo;
@@ -703,6 +741,9 @@ private:
             failCurrent(e.message);
             return fatalOnly(e);
         };
+        if (auto st = ownStore(); !st) {
+            return failWith(st.error());
+        }
         if (auto st = file.writer->finish(file.content.size); !st) {
             return failWith(st.error());
         }
@@ -726,6 +767,9 @@ private:
         auto uow = ports_.store.begin();
         if (!uow) {
             return failWith(uow.error());
+        }
+        if (auto st = ownStore(); !st) {
+            return failWith(st.error());
         }
         const auto now = domain::toUnixMillis(ports_.clock.now());
         auto id = file.content.replaces ? replaceEntry(**uow, now, file.content)
@@ -840,6 +884,9 @@ private:
         if (!current_ || current_->committed) {
             return;
         }
+        if (session_.sealer() == nullptr) {
+            return; // хранилище уже не наше; недописанное уберет gcPending при открытии
+        }
         if (current_->writer) {
             (void)ports_.store.blobs().discard(current_->writer->id());
         }
@@ -878,6 +925,7 @@ private:
     std::unordered_set<domain::Sha256, Sha256Hash> queuedSha_;
     std::uint64_t queuedBytes_ = 0;
     std::unordered_map<domain::Sha256, EntryId, Sha256Hash> seen_; // записано этим импортом
+    std::unordered_map<EntryId, domain::Sha256> hashOf_;           // обратный к seen_
     std::unordered_set<EntryId> replaced_; // заменены этим импортом: снимок о них устарел
     domain::ImportResult result_;
 };

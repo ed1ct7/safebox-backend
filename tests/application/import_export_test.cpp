@@ -465,6 +465,22 @@ TEST_CASE("replace works across chunk boundaries", "[import][UF-15]") {
     CHECK(f.store.pendingBlobs(f.safePath()) == 0);
 }
 
+TEST_CASE("two replaces of one entry in a request end with the later file", "[import][UF-15]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    REQUIRE(f.importFiles(s, {{"x.bin", randomBytes(100, 1)}}).imported == 1);
+    const auto before = f.entryNamed(s, "x.bin");
+    const auto small = randomBytes(200, 2);              // в пачку: пишется в конце
+    const auto big = randomBytes(kTestChunk * 2 + 5, 3); // потоком: пишется сразу
+    const auto r = f.importFiles(s, {{"x.bin", small, kReplace}, {"x.bin", big, kReplace}});
+    CHECK(r.replaced == 2);
+    const auto after = f.entryNamed(s, "x.bin");
+    CHECK(after.id == before.id);
+    CHECK((f.readContent(s, after.id) == big)); // без разбора: случайные байты не печатать
+    CHECK(f.store.blobCount(f.safePath()) == 1);
+    CHECK(f.store.pendingBlobs(f.safePath()) == 0);
+}
+
 TEST_CASE("replace of a folder keeps both", "[import][UF-15]") {
     AppFixture f;
     auto s = f.createSafe();
@@ -679,6 +695,22 @@ TEST_CASE("a repeated content is not written again", "[import][dedup]") {
         CHECK(r.duplicates.empty());
         CHECK(f.readContent(s, f.entryNamed(s, "old a.jpg").id) == photo);
     }
+    SECTION("what an entry held before a replace in the same request is not a repeat") {
+        const auto c1 = randomBytes(300, 5);
+        const auto c2 = randomBytes(300, 6);
+        const auto r = f.importFiles(s, {{"n.txt", c1}, {"n.txt", c2, kReplace}, {"m.txt", c1}});
+        CHECK(r.imported == 2);
+        CHECK(r.replaced == 1);
+        CHECK(r.duplicates.empty());
+        CHECK((f.readContent(s, f.entryNamed(s, "n.txt").id) == c2));
+        CHECK((f.readContent(s, f.entryNamed(s, "m.txt").id) == c1));
+    }
+    SECTION("empty files are never repeats") {
+        const auto r = f.importFiles(s, {{"e1.txt", ""}, {"e2.txt", ""}, {"e3.txt", ""}});
+        CHECK(r.imported == 3);
+        CHECK(r.duplicates.empty());
+        CHECK(f.importFiles(s, {{"e4.txt", ""}}).imported == 1);
+    }
     CHECK(f.store.pendingBlobs(f.safePath()) == 0);
 }
 
@@ -858,6 +890,72 @@ TEST_CASE("lock during a replace keeps the old content", "[import][UF-13][concur
     CHECK(blobOf(after) == blobOf(before));
     CHECK(f.readContent(*again, after.id) == old);
     CHECK(f.store.blobCount(f.safePath()) == 1);
+}
+
+TEST_CASE("a batch left after lock stopped waiting is written nowhere",
+          "[import][UF-13][concurrency]") {
+    AppFixture f;
+    f.config.leaseDrainTimeout = std::chrono::milliseconds(50);
+    f.services = app::makeServices(
+        {*f.crypto, f.store, f.thumbnailer, f.zip, f.clock, f.fetcher, f.settingsStore}, f.config);
+    auto s = f.createSafe();
+    auto import = f.services.importExport->beginImport(f.lease(s), std::nullopt);
+    REQUIRE(import.has_value());
+    REQUIRE((*import)->beginFile("a.txt", {}).has_value());
+    REQUIRE((*import)->write(domain::asBytes("queued")).has_value());
+    REQUIRE((*import)->endFile().has_value()); // в пачке, еще не записан
+
+    f.services.safe->lock(); // аренду импорта не дождался: сессия стерта, хранилище закрыто
+    auto other = f.createSafe("other"); // хранилище открыто уже на другом сейфе
+    import->reset();                    // деструктор пишет пачку - сейф не тот, отказ
+    CHECK(namesIn(f, other, std::nullopt).empty());
+    CHECK(f.store.blobCount(f.safePath("other")) == 0);
+    CHECK(f.store.pendingBlobs(f.safePath("other")) == 0);
+
+    f.services.safe->lock();
+    auto again = f.services.safe->unlock({"test", "secret1"});
+    REQUIRE(again.has_value());
+    CHECK(namesIn(f, *again, std::nullopt).empty());
+    CHECK(f.store.blobCount(f.safePath()) == 0);
+}
+
+TEST_CASE("a big file cut off by lock writes no tail into the next safe",
+          "[import][UF-13][concurrency]") {
+    AppFixture f;
+    f.config.leaseDrainTimeout = std::chrono::milliseconds(50);
+    f.services = app::makeServices(
+        {*f.crypto, f.store, f.thumbnailer, f.zip, f.clock, f.fetcher, f.settingsStore}, f.config);
+    auto s = f.createSafe();
+    auto import = f.services.importExport->beginImport(f.lease(s), std::nullopt);
+    REQUIRE(import.has_value());
+    REQUIRE((*import)->beginFile("big.bin", {}).has_value());
+    REQUIRE((*import)->write(domain::asBytes(randomBytes(kTestChunk * 2 + 5, 1))).has_value());
+    CHECK(f.store.pendingBlobs(f.safePath()) == 1); // куски уже пишутся потоком
+
+    f.services.safe->lock(); // аренду не дождался
+    auto other = f.createSafe("other");
+    // во втором сейфе идет свой большой файл: его недописанный блоб с тем же id
+    const auto theirs = randomBytes(kTestChunk * 3 + 7, 2);
+    auto second = f.services.importExport->beginImport(f.lease(other), std::nullopt);
+    REQUIRE(second.has_value());
+    REQUIRE((*second)->beginFile("theirs.bin", {}).has_value());
+    REQUIRE((*second)->write(domain::asBytes(theirs.substr(0, kTestChunk * 2 + 1))).has_value());
+
+    (void)(*import)->finish(); // конец запроса: хвост, запись и уборка - уже не в этот сейф
+    import->reset();
+
+    REQUIRE((*second)->write(domain::asBytes(theirs.substr(kTestChunk * 2 + 1))).has_value());
+    CHECK((*second)->finish().imported == 1);
+    second->reset();
+    CHECK(namesIn(f, other, std::nullopt) == Names{"theirs.bin"});
+    CHECK((f.readContent(other, f.entryNamed(other, "theirs.bin").id) == theirs));
+    CHECK(f.store.pendingBlobs(f.safePath("other")) == 0);
+
+    f.services.safe->lock();
+    auto again = f.services.safe->unlock({"test", "secret1"});
+    REQUIRE(again.has_value());
+    CHECK(namesIn(f, *again, std::nullopt).empty());
+    CHECK(f.store.pendingBlobs(f.safePath()) == 0); // недописанное убрано при открытии
 }
 
 TEST_CASE("tampering with the safe file is detected", "[import][integrity]") {
