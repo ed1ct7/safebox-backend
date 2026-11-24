@@ -1,6 +1,7 @@
 // Модель записи (уже расшифрованная). Зашифрованная строка таблицы - EntryRecord в ports/storage.hpp
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -30,6 +31,15 @@ struct TagAssignment {
     friend bool operator==(const TagAssignment&, const TagAssignment&) = default;
 };
 
+using Sha256 = std::array<std::byte, 32>;
+
+struct Dimensions {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+
+    friend bool operator==(const Dimensions&, const Dimensions&) = default;
+};
+
 struct EntryMeta {
     Kind kind = Kind::File;
     std::string mime;             // тип содержимого (для photo/video - то, что отдается inline)
@@ -44,6 +54,17 @@ struct EntryMeta {
     bool nameByUser = false; // имя задано пользователем - предпросмотр его не трогает
     bool descriptionByUser = false;
     std::vector<TagAssignment> tags; // прямые присвоения, по возрастанию tagId, без дублей
+
+    // Дальше - поля enc_meta layout 3 (схема 4). У записей layout 2 все пустые.
+    std::string source;                      // откуда запись ("telegram", "youtube"); пусто - нет
+    std::string sourceUrl;                   // адрес оригинала (пост, сообщение); пусто - нет
+    std::optional<std::int64_t> sourceDate;  // unix-мс публикации/сохранения в источнике
+    std::optional<Sha256> sha256;            // хеш исходного содержимого (открытого текста)
+    std::optional<Dimensions> dimensions;    // фото и видео: размер кадра в пикселях
+    std::optional<std::uint64_t> durationMs; // видео и аудио
+    // Запись лежит в корзине с этого момента (unix-мс). Ставится только корню удаленного
+    // поддерева: его потомки в корзине вместе с ним, parent_id не меняется.
+    std::optional<std::int64_t> trashedAt;
 };
 
 // Второе имя (nameEn) - английская локализация; пустая строка - не задано, показывается name.

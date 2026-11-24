@@ -355,7 +355,7 @@ TEST_CASE("categories and tags persist; removing a category cascades on disk",
 }
 
 TEST_CASE("a file with user_version 1 is refused with a clear message", "[sqlite][format]") {
-    CHECK(domain::kFormatVersion == 3);
+    CHECK(domain::kFormatVersion == 4);
     TempDir dir;
     const auto path = dir / "old.safebox";
     {
@@ -364,7 +364,7 @@ TEST_CASE("a file with user_version 1 is refused with a clear message", "[sqlite
     }
     auto bytes = readFile(path);
     REQUIRE(bytes.size() >= 100);
-    REQUIRE(be32(bytes, 60) == 3);
+    REQUIRE(be32(bytes, 60) == 4);
 
     const auto withVersion = [&](char version) {
         auto patched = bytes;
@@ -387,7 +387,7 @@ TEST_CASE("a file with user_version 1 is refused with a clear message", "[sqlite
     CHECK(inspected.error().message == opened.error().message);
 
     // файл новее - другое сообщение, как и раньше
-    withVersion(4);
+    withVersion(5);
     auto newer = store->open(path);
     REQUIRE_FALSE(newer.has_value());
     CHECK(newer.error().code == Code::NotASafe);
@@ -396,11 +396,90 @@ TEST_CASE("a file with user_version 1 is refused with a clear message", "[sqlite
     withVersion(0);
     CHECK(store->open(path).error().message == "Файл не является сейфом SafeBox");
 
-    withVersion(3); // и без подмены (текущая схема) файл открывается
+    withVersion(4); // и без подмены (текущая схема) файл открывается
     REQUIRE(store->open(path).has_value());
 }
 
-TEST_CASE("a v2 safe migrates to v3 on open: names intact, nameEn empty, then writable",
+namespace {
+
+std::int64_t userVersionOf(const std::filesystem::path& path) {
+    auto db = infra::sqlite::Database::open(path, infra::sqlite::OpenMode::ReadOnly);
+    REQUIRE(db.has_value());
+    auto version = (*db)->pragmaInt("user_version");
+    REQUIRE(version.has_value());
+    return *version;
+}
+
+} // namespace
+
+TEST_CASE("a v3 safe migrates to v4 on open: only the version changes",
+          "[sqlite][format][migration]") {
+    TempDir dir;
+    const auto path = dir / "v3.safebox";
+    {
+        auto store = infra::makeSqliteVaultStore();
+        REQUIRE(store->create(path, sampleMeta()).has_value());
+        auto uow = store->begin();
+        REQUIRE(uow.has_value());
+        auto category = (*uow)->tags().insertCategory();
+        REQUIRE(category.has_value());
+        REQUIRE(
+            (*uow)->tags().updateCategory(*category, domain::toBytes("People"), {}).has_value());
+        REQUIRE((*uow)->commit().has_value());
+    }
+    // Схемы 3 и 4 совпадают по таблицам: файл v3 - это файл v4 с прежним номером.
+    {
+        auto db = infra::sqlite::Database::open(path, infra::sqlite::OpenMode::ReadWrite);
+        REQUIRE(db.has_value());
+        REQUIRE((*db)->exec("PRAGMA user_version = 3;").has_value());
+    }
+    REQUIRE(userVersionOf(path) == 3);
+    const auto before = readFile(path);
+
+    auto store = infra::makeSqliteVaultStore();
+    REQUIRE(store->open(path).has_value());
+    {
+        auto uow = store->begin();
+        auto categories = (*uow)->tags().categories();
+        REQUIRE(categories.has_value());
+        REQUIRE(categories->size() == 1);
+        CHECK((*categories)[0].encName == domain::toBytes("People"));
+    }
+    store->close();
+    CHECK(userVersionOf(path) == 4);
+
+    // кроме номера схемы (и счетчика изменений в заголовке) файл не тронут
+    const auto after = readFile(path);
+    REQUIRE(after.size() == before.size());
+    std::size_t differing = 0;
+    for (std::size_t i = 100; i < after.size(); ++i) {
+        differing += after[i] != before[i] ? 1 : 0;
+    }
+    CHECK(differing == 0);
+}
+
+TEST_CASE("a failed migration rolls back and leaves the old schema",
+          "[sqlite][format][migration]") {
+    TempDir dir;
+    const auto path = dir / "broken-v2.safebox";
+    {
+        auto store = infra::makeSqliteVaultStore();
+        REQUIRE(store->create(path, sampleMeta()).has_value());
+    }
+    {
+        // номер схемы 2, а колонки v3 уже есть - ALTER TABLE на шаге 2 -> 3 упадет
+        auto db = infra::sqlite::Database::open(path, infra::sqlite::OpenMode::ReadWrite);
+        REQUIRE(db.has_value());
+        REQUIRE((*db)->exec("PRAGMA user_version = 2;").has_value());
+    }
+    auto store = infra::makeSqliteVaultStore();
+    auto opened = store->open(path);
+    REQUIRE_FALSE(opened.has_value());
+    CHECK_FALSE(store->isOpen());
+    CHECK(userVersionOf(path) == 2); // ни одного шага: вся цепочка - одна транзакция
+}
+
+TEST_CASE("a v2 safe migrates to v4 on open: names intact, nameEn empty, then writable",
           "[sqlite][format][migration]") {
     TempDir dir;
     const auto path = dir / "v2.safebox";

@@ -24,7 +24,7 @@ namespace safebox::domain {
 // менять можно только вместе с полной переушифровкой сейфа.
 inline constexpr std::uint32_t kSealVersion = 2;
 // Версия схемы файла (PRAGMA user_version, колонки таблиц). Меняется миграцией при открытии.
-inline constexpr std::uint32_t kFormatVersion = 3;
+inline constexpr std::uint32_t kFormatVersion = 4;
 inline constexpr std::int32_t kApplicationId = 0x53424F58; // 'S' 'B' 'O' 'X'
 inline constexpr std::string_view kSafeExtension = ".safebox";
 

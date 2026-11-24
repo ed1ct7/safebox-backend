@@ -3,12 +3,18 @@
 // в другую категорию.
 // В enc_meta еще лежат копии blob_id/thumb_blob_id, их сверяем с открытыми колонками.
 //
-// формат enc_meta v2 (little-endian):
-//   u8 layout=2 | u8 kind | u64 size | i64 createdAt | i64 modifiedAt |
+// формат enc_meta (little-endian), подробно - Linqtab, «Формат файла *.safebox»:
+//   u8 layout (2 или 3) | u8 kind | u64 size | i64 createdAt | i64 modifiedAt |
 //   u8 flags (bit0 blob, bit1 thumb, bit2 sourceModifiedAt, bit3 nameByUser,
 //             bit4 descriptionByUser) | [i64 blobId] | [i64 thumbBlobId] |
 //   [i64 sourceModifiedAt] | u16 len + mime | u32 len + url | u32 len + description |
 //   u16 n + n * (i64 tagId | u8 tagFlags: bit0 inherit)
+// layout 3 дописывает в конец:
+//   u16 extFlags (bit0 source, bit1 sourceUrl, bit2 sourceDate, bit3 sha256, bit4 dimensions,
+//                 bit5 durationMs, bit6 trashedAt) | [u16 len + source] | [u32 len + sourceUrl] |
+//   [i64 sourceDate] | [32 байта sha256] | [u32 width | u32 height] | [u64 durationMs] |
+//   [i64 trashedAt]
+// Читаем 2 и 3, пишем всегда 3 (запись layout 2 переписывается при первой правке).
 #include "sealing.hpp"
 
 #include <algorithm>
@@ -26,7 +32,8 @@ using domain::Result;
 
 namespace {
 
-constexpr std::uint8_t kMetaLayout = 2;
+constexpr std::uint8_t kMetaLayoutV2 = 2;
+constexpr std::uint8_t kMetaLayout = 3;
 constexpr std::uint8_t kHasBlob = 0x01;
 constexpr std::uint8_t kHasThumb = 0x02;
 constexpr std::uint8_t kHasSourceModified = 0x04;
@@ -34,6 +41,15 @@ constexpr std::uint8_t kNameByUser = 0x08;
 constexpr std::uint8_t kDescriptionByUser = 0x10;
 constexpr std::uint8_t kKnownFlags = 0x1F;
 constexpr std::uint8_t kTagInherit = 0x01;
+
+constexpr std::uint16_t kExtSource = 0x0001;
+constexpr std::uint16_t kExtSourceUrl = 0x0002;
+constexpr std::uint16_t kExtSourceDate = 0x0004;
+constexpr std::uint16_t kExtSha256 = 0x0008;
+constexpr std::uint16_t kExtDimensions = 0x0010;
+constexpr std::uint16_t kExtDuration = 0x0020;
+constexpr std::uint16_t kExtTrashed = 0x0040;
+constexpr std::uint16_t kKnownExt = 0x007F;
 
 class Writer {
 public:
@@ -49,6 +65,7 @@ public:
         const auto b = domain::asBytes(s);
         out.insert(out.end(), b.begin(), b.end());
     }
+    void raw(std::span<const std::byte> b) { out.insert(out.end(), b.begin(), b.end()); }
 
     Bytes out;
 };
@@ -76,6 +93,14 @@ public:
         }
         value.assign(domain::asChars(in_.subspan(pos_, len)));
         pos_ += len;
+        return true;
+    }
+    [[nodiscard]] bool raw(std::span<std::byte> value) {
+        if (in_.size() - pos_ < value.size()) {
+            return false;
+        }
+        std::copy_n(in_.begin() + static_cast<std::ptrdiff_t>(pos_), value.size(), value.begin());
+        pos_ += value.size();
         return true;
     }
     [[nodiscard]] bool done() const noexcept { return pos_ == in_.size(); }
@@ -126,8 +151,101 @@ Bytes encodeMeta(const domain::EntryMeta& meta) {
         w.put(meta.tags[i].tagId);
         w.put(static_cast<std::uint8_t>(meta.tags[i].inherit ? kTagInherit : 0));
     }
+
+    const auto sourceLen =
+        std::min<std::size_t>(meta.source.size(), std::numeric_limits<std::uint16_t>::max());
+    w.put(static_cast<std::uint16_t>(
+        (sourceLen != 0 ? kExtSource : 0) | (!meta.sourceUrl.empty() ? kExtSourceUrl : 0) |
+        (meta.sourceDate ? kExtSourceDate : 0) | (meta.sha256 ? kExtSha256 : 0) |
+        (meta.dimensions ? kExtDimensions : 0) | (meta.durationMs ? kExtDuration : 0) |
+        (meta.trashedAt ? kExtTrashed : 0)));
+    if (sourceLen != 0) {
+        w.put(static_cast<std::uint16_t>(sourceLen));
+        w.text(std::string_view(meta.source).substr(0, sourceLen));
+    }
+    if (!meta.sourceUrl.empty()) {
+        w.put(static_cast<std::uint32_t>(meta.sourceUrl.size()));
+        w.text(meta.sourceUrl);
+    }
+    if (meta.sourceDate) {
+        w.put(*meta.sourceDate);
+    }
+    if (meta.sha256) {
+        w.raw(*meta.sha256);
+    }
+    if (meta.dimensions) {
+        w.put(meta.dimensions->width);
+        w.put(meta.dimensions->height);
+    }
+    if (meta.durationMs) {
+        w.put(*meta.durationMs);
+    }
+    if (meta.trashedAt) {
+        w.put(*meta.trashedAt);
+    }
     return std::move(w.out);
 }
+
+namespace {
+
+// Хвост layout 3. Бит стоит - поле есть; пустые строки с поднятым битом не пишутся,
+// поэтому при чтении это подмена.
+[[nodiscard]] bool decodeExtension(Reader& r, domain::EntryMeta& meta) {
+    std::uint16_t ext = 0;
+    if (!r.get(ext) || (ext & ~kKnownExt) != 0) {
+        return false;
+    }
+    if ((ext & kExtSource) != 0) {
+        std::uint16_t len = 0;
+        if (!r.get(len) || len == 0 || !r.text(len, meta.source)) {
+            return false;
+        }
+    }
+    if ((ext & kExtSourceUrl) != 0) {
+        std::uint32_t len = 0;
+        if (!r.get(len) || len == 0 || !r.text(len, meta.sourceUrl)) {
+            return false;
+        }
+    }
+    if ((ext & kExtSourceDate) != 0) {
+        std::int64_t date = 0;
+        if (!r.get(date)) {
+            return false;
+        }
+        meta.sourceDate = date;
+    }
+    if ((ext & kExtSha256) != 0) {
+        domain::Sha256 hash{};
+        if (!r.raw(hash)) {
+            return false;
+        }
+        meta.sha256 = hash;
+    }
+    if ((ext & kExtDimensions) != 0) {
+        domain::Dimensions dims;
+        if (!r.get(dims.width) || !r.get(dims.height)) {
+            return false;
+        }
+        meta.dimensions = dims;
+    }
+    if ((ext & kExtDuration) != 0) {
+        std::uint64_t duration = 0;
+        if (!r.get(duration)) {
+            return false;
+        }
+        meta.durationMs = duration;
+    }
+    if ((ext & kExtTrashed) != 0) {
+        std::int64_t at = 0;
+        if (!r.get(at)) {
+            return false;
+        }
+        meta.trashedAt = at;
+    }
+    return true;
+}
+
+} // namespace
 
 Result<domain::EntryMeta> decodeMeta(std::span<const std::byte> bytes) {
     Reader r(bytes);
@@ -135,7 +253,7 @@ Result<domain::EntryMeta> decodeMeta(std::span<const std::byte> bytes) {
     std::uint8_t kind = 0;
     std::uint8_t flags = 0;
     domain::EntryMeta meta;
-    if (!r.get(layout) || layout != kMetaLayout || !r.get(kind) ||
+    if (!r.get(layout) || (layout != kMetaLayoutV2 && layout != kMetaLayout) || !r.get(kind) ||
         kind > static_cast<std::uint8_t>(domain::Kind::Link) || !r.get(meta.size) ||
         !r.get(meta.createdAt) || !r.get(meta.modifiedAt) || !r.get(flags) ||
         (flags & ~kKnownFlags) != 0) {
@@ -183,6 +301,9 @@ Result<domain::EntryMeta> decodeMeta(std::span<const std::byte> bytes) {
         }
         tag.inherit = (tagFlags & kTagInherit) != 0;
         meta.tags.push_back(tag);
+    }
+    if (layout == kMetaLayout && !decodeExtension(r, meta)) {
+        return corrupted();
     }
     if (!r.done()) {
         return corrupted();

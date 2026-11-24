@@ -76,8 +76,40 @@ ALTER TABLE tag_categories ADD COLUMN enc_name_en BLOB NOT NULL DEFAULT x'';
 ALTER TABLE tags ADD COLUMN enc_name_en BLOB NOT NULL DEFAULT x'';
 )sql";
 
-// Сейфы этих схем умеем открывать (более старые - нет): текущая и предыдущая.
+// v3 -> v4: таблицы не меняются. В enc_meta появляется layout 3 (источник, sha256, размеры,
+// корзина), его пишет только новая версия - номер схемы не дает открыть такой файл версиям,
+// которые знают лишь layout 2 и сочли бы новые записи поврежденными.
+constexpr std::string_view kMigrateV3ToV4 = "";
+
+struct Migration {
+    std::int64_t from; // user_version до шага, после - from + 1
+    std::string_view sql;
+};
+
+// Шаги по порядку; последний ведет в kFormatVersion.
+constexpr std::array kMigrations{
+    Migration{2, kMigrateV2ToV3},
+    Migration{3, kMigrateV3ToV4},
+};
+
+// Сейфы этих схем умеем открывать (более старые - нет).
 constexpr std::int64_t kMinSupportedSchema = 2;
+
+static_assert(kMigrations.front().from == kMinSupportedSchema);
+static_assert(kMigrations.back().from + 1 == static_cast<std::int64_t>(domain::kFormatVersion));
+
+// Применить все шаги начиная со схемы from, внутри уже открытой транзакции.
+[[nodiscard]] Status applyMigrations(Database& db, std::int64_t from) {
+    for (const auto& step : kMigrations) {
+        if (step.from < from || step.sql.empty()) {
+            continue;
+        }
+        if (auto st = db.exec(step.sql); !st) {
+            return st;
+        }
+    }
+    return {};
+}
 
 [[nodiscard]] std::uint32_t readBe32(const std::array<unsigned char, 100>& h, std::size_t at) {
     return (std::uint32_t{h[at]} << 24) | (std::uint32_t{h[at + 1]} << 16) |
@@ -156,7 +188,7 @@ Status createSchema(Database& db, const domain::SafeMeta& meta) {
         if (auto st = db.exec(kSchemaV2); !st) {
             return st;
         }
-        if (auto st = db.exec(kMigrateV2ToV3); !st) {
+        if (auto st = applyMigrations(db, kMinSupportedSchema); !st) {
             return st;
         }
         auto insert = db.prepare(
@@ -234,15 +266,18 @@ Status migrateIfNeeded(Database& db) {
     if (*version == static_cast<std::int64_t>(domain::kFormatVersion)) {
         return {};
     }
-    if (*version != kMinSupportedSchema) {
+    if (*version < kMinSupportedSchema) {
         return oldFormat();
+    }
+    if (*version > static_cast<std::int64_t>(domain::kFormatVersion)) {
+        return notASafe(); // verifyOpened уже отсеял, но миграцию вниз не делаем никогда
     }
 
     if (auto st = db.exec("BEGIN IMMEDIATE;"); !st) {
         return st;
     }
     auto body = [&]() -> Status {
-        if (auto st = db.exec(kMigrateV2ToV3); !st) {
+        if (auto st = applyMigrations(db, *version); !st) {
             return st;
         }
         return db.exec(fmt::format("PRAGMA user_version = {};", domain::kFormatVersion));

@@ -11,7 +11,8 @@ namespace safebox::infra::sqlite {
 [[nodiscard]] domain::Status configure(Database& db);
 [[nodiscard]] domain::Status createSchema(Database& db, const domain::SafeMeta& meta);
 [[nodiscard]] domain::Status verifyOpened(Database& db);
-// Поднимает user_version до kFormatVersion (сейчас миграция v2 -> v3: колонки enc_name_en).
+// Поднимает user_version до kFormatVersion одной транзакцией: v2 -> v3 (колонки enc_name_en),
+// v3 -> v4 (только номер: enc_meta layout 3).
 // Звать после verifyOpened на открытом соединении; идемпотентна.
 [[nodiscard]] domain::Status migrateIfNeeded(Database& db);
 
