@@ -1693,6 +1693,8 @@ TEST_CASE("frontend assets and unknown routes", "[http][assets]") {
     CHECK(stub.header("content-type").rfind("text/html", 0) == 0);
     CHECK(stub.header("content-security-policy").find("frame-ancestors 'none'") !=
           std::string::npos);
+    CHECK(stub.header("content-security-policy")
+              .find("frame-src https://www.youtube-nocookie.com;") != std::string::npos);
     CHECK(f.request("GET", "/some/page").status == 404);
 
     auto unknownApi = f.api("GET", "/api/v1/nothing");

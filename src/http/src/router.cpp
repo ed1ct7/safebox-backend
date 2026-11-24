@@ -15,6 +15,8 @@ constexpr std::string_view kStubPage =
 constexpr std::string_view kSpaCsp =
     "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; "
     "style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; "
+    // плеер роликов YouTube в просмотрщике (youtube-nocookie, без cookies до запуска)
+    "frame-src https://www.youtube-nocookie.com; "
     "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 [[nodiscard]] bool hasExtension(std::string_view path) {
