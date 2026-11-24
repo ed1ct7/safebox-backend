@@ -14,6 +14,13 @@
 #include "safebox/infra/factories.hpp"
 #include "sqlite_schema.hpp"
 
+#if defined(_WIN32)
+#include <windows.h> // WIN32_LEAN_AND_MEAN и NOMINMAX - из CMakeLists
+#else
+#include <cerrno>
+#include <unistd.h>
+#endif
+
 namespace safebox::infra::sqlite {
 
 using domain::BlobId;
@@ -37,6 +44,39 @@ Result<std::unique_lock<std::mutex>> lockOpen(Connection& conn) {
 }
 
 namespace {
+
+// Переименование без замены: файл, появившийся под именем to, не затирается. true - готово,
+// false - имя занято; другая ошибка - в ec.
+bool renameNoReplace(const std::filesystem::path& from, const std::filesystem::path& to,
+                     std::error_code& ec) {
+    ec.clear();
+#if defined(_WIN32)
+    if (MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_WRITE_THROUGH) != 0) {
+        return true;
+    }
+    const auto err = GetLastError();
+    if (err != ERROR_ALREADY_EXISTS && err != ERROR_FILE_EXISTS) {
+        ec.assign(static_cast<int>(err), std::system_category());
+    }
+#else
+    if (::link(from.c_str(), to.c_str()) == 0) {
+        (void)::unlink(from.c_str()); // не удалось - останется .part, копия уже на месте
+        return true;
+    }
+    const int err = errno;
+    if (err == EPERM || err == ENOTSUP || err == EOPNOTSUPP) { // ФС без жестких ссылок (FAT)
+        if (std::filesystem::exists(to, ec) || ec) {
+            return false;
+        }
+        std::filesystem::rename(from, to, ec);
+        return !ec;
+    }
+    if (err != EEXIST) {
+        ec.assign(err, std::generic_category());
+    }
+#endif
+    return false;
+}
 
 constexpr std::string_view kEntryColumns =
     "id, parent_id, is_folder, blob_id, thumb_blob_id, enc_name, enc_meta";
@@ -709,13 +749,13 @@ private:
             }
         }
         std::error_code ec;
-        if (std::filesystem::exists(target_, ec)) {
-            return fail(Error::Code::AlreadyExists, "Файл уже существует");
-        }
-        std::filesystem::rename(part_, target_, ec);
+        const bool moved = renameNoReplace(part_, target_, ec);
         if (ec) {
             return fail(Error::Code::IoError,
                         "Не удалось переименовать копию сейфа: " + domain::pathToUtf8(target_));
+        }
+        if (!moved) { // файл появился под этим именем, пока шла копия
+            return fail(Error::Code::AlreadyExists, "Файл уже существует");
         }
         done_ = true;
         return true;

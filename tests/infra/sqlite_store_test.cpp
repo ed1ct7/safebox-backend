@@ -671,6 +671,31 @@ TEST_CASE("backup copies the open safe page by page, with writes made between st
     CHECK(missingDir.error().code == Code::InvalidArgument);
 }
 
+TEST_CASE("a file that took the name during a backup is not overwritten", "[sqlite][backup]") {
+    TempDir dir;
+    auto store = infra::makeSqliteVaultStore();
+    REQUIRE(store->create(dir / "v.safebox", sampleMeta()).has_value());
+    insertEntry(*store, std::nullopt, true);
+
+    auto copy = store->backup(dir / "copy.safebox");
+    REQUIRE(copy.has_value());
+    {
+        std::ofstream other(dir / "copy.safebox", std::ios::binary);
+        other << "someone else's file";
+    }
+    domain::Result<bool> done = false;
+    for (int i = 0; i < 100 && done && !*done; ++i) {
+        done = (*copy)->step();
+    }
+    REQUIRE_FALSE(done.has_value());
+    CHECK(done.error().code == Code::AlreadyExists);
+    copy->reset();
+    CHECK_FALSE(std::filesystem::exists(dir / "copy.safebox.part"));
+    std::ifstream kept(dir / "copy.safebox", std::ios::binary);
+    const std::string text{std::istreambuf_iterator<char>(kept), {}};
+    CHECK(text == "someone else's file");
+}
+
 TEST_CASE("an unfinished backup leaves no files; close stops it", "[sqlite][backup]") {
     TempDir dir;
     auto store = infra::makeSqliteVaultStore();
