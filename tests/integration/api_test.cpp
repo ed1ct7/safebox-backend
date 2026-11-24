@@ -1233,3 +1233,47 @@ TEST_CASE("backup over HTTP: a copy of the open safe opens with the same passwor
     CHECK(content->body == "первый");
     CHECK_FALSE(get(c, "/api/v1/safe/status", token).contains("backup")); // у копии своей нет
 }
+
+TEST_CASE("a video gets a thumbnail from the client over HTTP", "[integration][thumbnail]") {
+    test::TempDir dir;
+    Stack stack(dir.path());
+    auto c = stack.client();
+    const auto session =
+        post(c, "/api/v1/safe/create",
+             {{"path", "Видео"}, {"password", "пароль-1"}, {"confirm", "пароль-1"}}, 201);
+    auto token = session["token"].get<std::string>();
+    httplib::UploadFormDataItems items = {{"file", "not really mp4", "clip.mp4", "video/mp4"}};
+    auto imported = c.Post("/api/v1/import", bearer(token), items);
+    REQUIRE(imported);
+    REQUIRE(imported->status == 200);
+    const auto clip = byName(get(c, "/api/v1/entries", token), "clip.mp4");
+    CHECK(clip["hasThumbnail"] == false);
+    const auto path = "/api/v1/media/" + std::to_string(clip["id"].get<std::int64_t>());
+
+    auto bad = c.Put(path + "/thumbnail", bearer(token), "not an image", "image/png");
+    REQUIRE(bad);
+    CHECK(bad->status == 422);
+
+    auto put = c.Put(path + "/thumbnail?width=1280&height=720&durationMs=4000", bearer(token),
+                     makePng(1280, 720), "image/png");
+    REQUIRE(put);
+    REQUIRE(put->status == 200);
+    const auto entry = Json::parse(put->body);
+    CHECK(entry["hasThumbnail"] == true);
+    CHECK(entry["width"] == 1280);
+    CHECK(entry["durationMs"] == 4000);
+
+    post(c, "/api/v1/safe/lock", Json::object(), 204, bearer(token));
+    token = post(c, "/api/v1/safe/unlock",
+                 {{"path", session["safe"]["path"]}, {"password", "пароль-1"}}, 200)["token"]
+                .get<std::string>();
+    const auto again = byName(get(c, "/api/v1/entries", token), "clip.mp4");
+    CHECK(again["height"] == 720);
+    auto thumb = c.Get(path + "/thumbnail", bearer(token));
+    REQUIRE(thumb);
+    REQUIRE(thumb->status == 200);
+    CHECK(thumb->get_header_value("Content-Type") == "image/jpeg");
+    REQUIRE(thumb->body.size() > 2);
+    CHECK(static_cast<unsigned char>(thumb->body[0]) == 0xFF); // JPEG, не присланный PNG
+    CHECK(static_cast<unsigned char>(thumb->body[1]) == 0xD8);
+}

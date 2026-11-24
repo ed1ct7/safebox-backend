@@ -228,6 +228,13 @@ Json toJson(const domain::Entry& entry) {
     if (entry.meta.trashedAt) {
         j["trashedAt"] = *entry.meta.trashedAt; // только у корня корзины
     }
+    if (entry.meta.dimensions) { // известны - от клиента (PUT миниатюры)
+        j["width"] = entry.meta.dimensions->width;
+        j["height"] = entry.meta.dimensions->height;
+    }
+    if (entry.meta.durationMs) {
+        j["durationMs"] = *entry.meta.durationMs;
+    }
     return j;
 }
 

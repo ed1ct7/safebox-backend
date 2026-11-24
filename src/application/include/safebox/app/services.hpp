@@ -228,6 +228,12 @@ public:
 
 // ImportExportService
 
+// Что клиент знает о кадре: размер в пикселях и длительность (видео, аудио).
+struct MediaInfo {
+    std::optional<domain::Dimensions> dimensions; // обе стороны > 0
+    std::optional<std::uint64_t> durationMs;
+};
+
 // Файл с тем же содержимым (sha256) уже есть в сейфе или раньше в этом же импорте.
 enum class DuplicatePolicy {
     Skip,   // не записывать, сообщить в ImportResult::duplicates
@@ -316,6 +322,13 @@ public:
     // вызывающего. Запись без вложений и не папка -> InvalidArgument.
     [[nodiscard]] virtual Status exportZip(const Lease& lease, domain::EntryId id,
                                            domain::ByteSink& out) = 0;
+    // Миниатюра от клиента (кадр видео, снимок AVIF/HEIC, который сервер не читает): картинка
+    // JPEG/PNG/WebP/GIF/BMP до kThumbnailSourceLimit перекодируется, как при импорте (JPEG,
+    // <= kThumbnailMaxSide), старая миниатюра стирается. Заданные поля info пишутся в мету.
+    // Папка, не картинка, кривые info -> InvalidArgument. modifiedAt не меняется.
+    [[nodiscard]] virtual Result<domain::Entry> setThumbnail(const Lease& lease, domain::EntryId id,
+                                                             std::span<const std::byte> image,
+                                                             const MediaInfo& info) = 0;
 };
 
 // TagsService

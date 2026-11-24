@@ -296,6 +296,23 @@ public:
         return out.write(domain::asBytes("PK-fake-zip"));
     }
 
+    app::Result<domain::Entry> setThumbnail(const app::Lease&, domain::EntryId id,
+                                            std::span<const std::byte> image,
+                                            const app::MediaInfo& info) override {
+        if (id == 404) {
+            return domain::fail(domain::Error::Code::NotFound, "Объект не найден");
+        }
+        lastThumb.assign(reinterpret_cast<const char*>(image.data()), image.size());
+        lastMediaInfo = info;
+        if (lastThumb == "not an image") {
+            return domain::fail(domain::Error::Code::InvalidArgument, "Не удалось прочитать");
+        }
+        auto entry = makeEntry(id, std::nullopt, domain::Kind::Video, "clip.mp4");
+        entry.meta.dimensions = info.dimensions;
+        entry.meta.durationMs = info.durationMs;
+        return entry;
+    }
+
     std::string content = "0123456789ABCDEF";
     std::map<std::string, std::string> imported;
     std::map<std::string, app::ImportFileOptions> importOptions; // что дошло в beginFile
@@ -305,6 +322,8 @@ public:
     std::optional<domain::EntryId> planParent;
     std::optional<domain::EntryId> lastZipId;
     std::vector<app::ImportPlanFile> planFiles;
+    std::string lastThumb;
+    std::optional<app::MediaInfo> lastMediaInfo;
 };
 
 class FakeSearchService final : public app::SearchService {

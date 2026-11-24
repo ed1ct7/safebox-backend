@@ -1623,3 +1623,57 @@ TEST_CASE("frontend assets and unknown routes", "[http][assets]") {
     CHECK(js.header("cache-control").find("immutable") != std::string::npos);
     CHECK(f.request("GET", "/missing.png").status == 404);
 }
+
+TEST_CASE("PUT thumbnail takes an image body and frame info from the query", "[http][media]") {
+    HttpFixture f;
+    const std::string bearer = "Authorization: Bearer " + std::string(kApiToken);
+    const auto put = [&](const std::string& target, const std::string& type,
+                         const std::string& body) {
+        std::vector<std::string> headers{bearer};
+        if (!type.empty()) {
+            headers.push_back("Content-Type: " + type);
+        }
+        return f.request("PUT", target, headers, body);
+    };
+    const std::string frame(2000, 'x'); // больше maxJsonBody: у миниатюры свой лимит
+
+    auto ok = put("/api/v1/media/7/thumbnail?width=1920&height=1080&durationMs=61500", "image/png",
+                  frame);
+    REQUIRE(ok.status == 200);
+    CHECK(f.fakes.importExport->lastThumb == frame);
+    REQUIRE(f.fakes.importExport->lastMediaInfo.has_value());
+    CHECK(f.fakes.importExport->lastMediaInfo->dimensions == domain::Dimensions{1920, 1080});
+    CHECK(f.fakes.importExport->lastMediaInfo->durationMs == 61500u);
+    const auto entry = ok.json();
+    CHECK(entry["id"] == 7);
+    CHECK(entry["width"] == 1920);
+    CHECK(entry["height"] == 1080);
+    CHECK(entry["durationMs"] == 61500);
+
+    auto plain = put("/api/v1/media/7/thumbnail", "", "jpeg");
+    REQUIRE(plain.status == 200);
+    CHECK_FALSE(f.fakes.importExport->lastMediaInfo->dimensions.has_value());
+    CHECK_FALSE(plain.json().contains("width"));
+    CHECK(put("/api/v1/media/7/thumbnail", "application/octet-stream", "x").status == 200);
+
+    CHECK(put("/api/v1/media/7/thumbnail?width=10", "image/jpeg", "x").status == 400);
+    CHECK(put("/api/v1/media/7/thumbnail?width=a&height=2", "image/jpeg", "x").status == 400);
+    CHECK(put("/api/v1/media/7/thumbnail?durationMs=-1", "image/jpeg", "x").status == 400);
+    CHECK(put("/api/v1/media/x/thumbnail", "image/jpeg", "x").status == 400);
+    CHECK(put("/api/v1/media/7/thumbnail", "image/jpeg", "").status == 400);
+    CHECK(put("/api/v1/media/7/thumbnail", "text/html", "x").status == 415);
+    CHECK(put("/api/v1/media/7/thumbnail", "image/jpeg", "not an image").status == 422);
+    CHECK(put("/api/v1/media/404/thumbnail", "image/jpeg", "x").status == 404);
+    CHECK(f.request("PUT", "/api/v1/media/7/thumbnail", {"Content-Type: image/jpeg"}, "x").status ==
+          401);
+    CHECK(f.request("PUT", "/api/v1/media/7/thumbnail",
+                    {"Cookie: sbx_media=" + std::string(kMediaToken), "Content-Type: image/jpeg"},
+                    "x")
+              .status == 401); // media-cookie только на чтение
+    CHECK(f.request("PUT", "/api/v1/media/7/thumbnail",
+                    {bearer, "Content-Type: image/jpeg", "Origin: https://evil.example"}, "x")
+              .status == 403);
+    // JSON-маршруты по-прежнему не принимают картинку
+    CHECK(f.request("PUT", "/api/v1/entries/7", {bearer, "Content-Type: image/png"}, "x").status ==
+          415);
+}

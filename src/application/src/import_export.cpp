@@ -231,6 +231,7 @@ constexpr std::string_view kAttachmentsSuffix = " (вложения)";
 constexpr std::size_t kBatchFiles = 256;           // файлов в одной транзакции
 constexpr std::uint64_t kBatchBytes = 64ull << 20; // открытых байтов в памяти на пачку
 constexpr unsigned kMaxThumbnailThreads = 8;
+constexpr std::uint32_t kMaxMediaSide = 1u << 16; // размер кадра от клиента, пикселей
 constexpr std::size_t kMinBufferCapacity = 64u << 10;
 
 // Дописать в буфер; при росте старая память затирается (в ней открытое содержимое).
@@ -956,6 +957,114 @@ public:
                 {file.path, describeEntry(ctx->session, cat, *cat.find(occupant->id))});
         }
         return plan;
+    }
+
+    Result<domain::Entry> setThumbnail(const Lease& lease, EntryId id,
+                                       std::span<const std::byte> image,
+                                       const MediaInfo& info) override {
+        if (image.size() > domain::kThumbnailSourceLimit) {
+            return fail(Error::Code::InvalidArgument, "Картинка для миниатюры больше 64 МиБ");
+        }
+        if (info.dimensions &&
+            (info.dimensions->width == 0 || info.dimensions->height == 0 ||
+             info.dimensions->width > kMaxMediaSide || info.dimensions->height > kMaxMediaSide)) {
+            return fail(Error::Code::InvalidArgument, "Некорректный размер кадра");
+        }
+        auto ctx = contextOf(lease);
+        if (!ctx) {
+            return std::unexpected(ctx.error());
+        }
+        auto catalog = catalogOf(*ctx, ports_.store);
+        if (!catalog) {
+            return std::unexpected(catalog.error());
+        }
+        const auto* node = (*catalog)->find(id);
+        if (node == nullptr) {
+            return fail(Error::Code::NotFound, "Объект не найден");
+        }
+        if (node->entry.isFolder()) {
+            return fail(Error::Code::InvalidArgument, "У папки нет миниатюры");
+        }
+        auto thumb = ports_.thumbnailer.make(image);
+        if (!thumb) {
+            return std::unexpected(thumb.error());
+        }
+        if (thumb->empty()) {
+            return fail(Error::Code::InvalidArgument,
+                        "Не удалось прочитать картинку (нужен JPEG, PNG или WebP)");
+        }
+        const Sealer& sealer = *ctx->sealer;
+        // блоб пишется до транзакции (blobs() и UnitOfWork - разные транзакции)
+        auto blob = writeBlob(ports_.store.blobs(), sealer, ctx->session.chunkSize(),
+                              KeyPurpose::Thumbnails, *thumb);
+        domain::secureWipe(*thumb);
+        if (!blob) {
+            return std::unexpected(blob.error());
+        }
+        bool replaced = false;
+        auto entry = commitThumbnail(sealer, id, *blob, info, replaced);
+        if (!entry) {
+            (void)ports_.store.blobs().discard(*blob);
+            return entry;
+        }
+        ctx->session.catalogChanged({.entries = {id}});
+        if (replaced) {
+            (void)ports_.store.compact(); // старая миниатюра освободила место в файле
+        }
+        entry->childCount = (*catalog)->childCount(id);
+        entry->inheritedTags = (*catalog)->inheritedTags(id);
+        return entry;
+    }
+
+    // Новая миниатюра (pending) -> запись, старая стирается; одна транзакция.
+    Result<domain::Entry> commitThumbnail(const Sealer& sealer, EntryId id, BlobId thumb,
+                                          const MediaInfo& info, bool& replaced) {
+        auto uow = ports_.store.begin();
+        if (!uow) {
+            return std::unexpected(uow.error());
+        }
+        auto record = (*uow)->entries().get(id);
+        if (!record) {
+            return std::unexpected(record.error());
+        }
+        auto opened = sealer.openEntry(*record);
+        if (!opened) {
+            return std::unexpected(opened.error());
+        }
+        domain::Entry entry = std::move(*opened);
+        if (entry.isFolder()) {
+            return fail(Error::Code::InvalidArgument, "У папки нет миниатюры");
+        }
+        const auto oldThumb = record->thumbBlobId;
+        record->thumbBlobId = thumb;
+        entry.meta.thumbBlobId = thumb;
+        if (info.dimensions) {
+            entry.meta.dimensions = info.dimensions;
+        }
+        if (info.durationMs) {
+            entry.meta.durationMs = info.durationMs;
+        }
+        auto encMeta = sealer.sealMeta(id, entry.meta);
+        if (!encMeta) {
+            return std::unexpected(encMeta.error());
+        }
+        record->encMeta = std::move(*encMeta);
+        if (auto st = (*uow)->entries().update(*record); !st) {
+            return std::unexpected(st.error());
+        }
+        if (auto st = (*uow)->blobs().promote(thumb); !st) {
+            return std::unexpected(st.error());
+        }
+        if (oldThumb) {
+            if (auto st = (*uow)->blobs().remove(*oldThumb); !st) {
+                return std::unexpected(st.error());
+            }
+        }
+        if (auto st = (*uow)->commit(); !st) {
+            return std::unexpected(st.error());
+        }
+        replaced = oldThumb.has_value();
+        return entry;
     }
 
     Result<OpenedContent> openContent(Lease lease, EntryId id, ContentVariant variant) override {

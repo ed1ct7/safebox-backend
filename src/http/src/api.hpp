@@ -25,6 +25,8 @@ using Json = nlohmann::json;
 inline constexpr std::string_view kImportPath = "/api/v1/import";
 inline constexpr std::string_view kImportPlanPath = "/api/v1/import/plan";
 inline constexpr std::string_view kLinksPath = "/api/v1/links";
+// PUT /api/v1/media/:id/thumbnail - тело картинка, не JSON
+[[nodiscard]] bool isThumbnailUpload(const httplib::Request& req);
 // Лимит JSON плана и manifest импорта и пачки ссылок: на 100 000 файлов (10 000 ссылок) с длинными
 // путями обычного лимита мало.
 inline constexpr std::size_t kMaxImportJsonBytes = 32 * 1024 * 1024;

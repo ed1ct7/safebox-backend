@@ -1080,3 +1080,71 @@ TEST_CASE("a link without a blob goes into the zip as an .url shortcut", "[expor
     CHECK(attachments.files.size() == 1);
     CHECK(attachments.files.contains("example.com (вложения)/заметка.txt"));
 }
+
+TEST_CASE("a client thumbnail replaces the old one and keeps frame size and duration",
+          "[import][thumbnail]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    REQUIRE(f.importFiles(s, {{"clip.mp4", "video"}, {"море.jpg", fakeJpeg(500, 1)}}).imported ==
+            2);
+    const auto clip = f.entryNamed(s, "clip.mp4");
+    const auto photo = f.entryNamed(s, "море.jpg");
+    CHECK_FALSE(clip.hasThumbnail());
+    REQUIRE(photo.hasThumbnail());
+    const auto blobs = f.store.blobCount(f.safePath()); // 2 содержимого + миниатюра фото
+    const auto modified = clip.meta.modifiedAt;
+    const auto put = [&](domain::EntryId id, std::string_view image, app::MediaInfo info = {}) {
+        return f.services.importExport->setThumbnail(f.lease(s), id, domain::asBytes(image), info);
+    };
+
+    auto first = put(clip.id, "frame-1", {domain::Dimensions{1920, 1080}, 61'500});
+    REQUIRE(first.has_value());
+    CHECK(first->hasThumbnail());
+    CHECK(first->meta.modifiedAt == modified);
+    CHECK(f.readContent(s, clip.id, app::ContentVariant::Thumbnail) == "THUMB:7");
+    CHECK(f.store.blobCount(f.safePath()) == blobs + 1);
+
+    // вторая заменяет первую; без info размеры остаются прежними
+    REQUIRE(put(clip.id, "frame-two!").has_value());
+    CHECK(f.readContent(s, clip.id, app::ContentVariant::Thumbnail) == "THUMB:10");
+    CHECK(f.store.blobCount(f.safePath()) == blobs + 1);
+    CHECK(f.store.pendingBlobs(f.safePath()) == 0);
+
+    // фото тоже можно: своя миниатюра заменяется
+    REQUIRE(put(photo.id, "better").has_value());
+    CHECK(f.readContent(s, photo.id, app::ContentVariant::Thumbnail) == "THUMB:6");
+    CHECK(f.store.blobCount(f.safePath()) == blobs + 1);
+
+    s = reopen(f);
+    const auto again = f.entryNamed(s, "clip.mp4");
+    REQUIRE(again.meta.dimensions.has_value());
+    CHECK(*again.meta.dimensions == domain::Dimensions{1920, 1080});
+    CHECK(again.meta.durationMs == 61'500u);
+    CHECK(f.readContent(s, clip.id, app::ContentVariant::Thumbnail) == "THUMB:10");
+}
+
+TEST_CASE("a client thumbnail is refused for folders, non-images and bad sizes",
+          "[import][thumbnail]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    REQUIRE(f.importFiles(s, {{"Папка/clip.mp4", "video"}}).imported == 1);
+    const auto folder = f.entryNamed(s, "Папка");
+    const auto clip = f.entryNamed(s, "clip.mp4", folder.id);
+    const auto blobs = f.store.blobCount(f.safePath());
+    const auto put = [&](domain::EntryId id, app::MediaInfo info = {}) {
+        return f.services.importExport->setThumbnail(f.lease(s), id, domain::asBytes("img"), info);
+    };
+
+    CHECK(put(9999).error().code == Code::NotFound);
+    CHECK(put(folder.id).error().code == Code::InvalidArgument);
+    CHECK(put(clip.id, {domain::Dimensions{0, 10}, std::nullopt}).error().code ==
+          Code::InvalidArgument);
+    CHECK(put(clip.id, {domain::Dimensions{10, 1u << 20}, std::nullopt}).error().code ==
+          Code::InvalidArgument);
+    f.thumbnailer.enabled = false; // не картинка
+    CHECK(put(clip.id).error().code == Code::InvalidArgument);
+
+    CHECK(f.store.blobCount(f.safePath()) == blobs);
+    CHECK(f.store.pendingBlobs(f.safePath()) == 0);
+    CHECK_FALSE(f.entryNamed(s, "clip.mp4", folder.id).hasThumbnail());
+}

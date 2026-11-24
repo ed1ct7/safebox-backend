@@ -1,13 +1,15 @@
 // Проверки до роутинга. На 127.0.0.1 может постучаться любая страница в браузере, поэтому:
 // - Host только из белого списка (DNS rebinding)
 // - Origin на изменяющих запросах, Sec-Fetch-Site: cross-site режем
-// - тело только JSON и с лимитом размера (кроме импорта; у плана импорта лимит свой)
+// - тело только JSON и с лимитом размера (кроме импорта; у плана импорта лимит свой;
+//   миниатюра от клиента - картинка до kThumbnailSourceLimit)
 #include <algorithm>
 #include <charconv>
 #include <format>
 
 #include "api.hpp"
 #include "safebox/domain/model/rules.hpp"
+#include "safebox/domain/ports/media.hpp"
 
 namespace safebox::http {
 
@@ -38,6 +40,13 @@ HandlerResponse reject(httplib::Response& res, int status, std::string_view code
 }
 
 } // namespace
+
+bool isThumbnailUpload(const httplib::Request& req) {
+    static constexpr std::string_view kPrefix = "/api/v1/media/";
+    static constexpr std::string_view kSuffix = "/thumbnail";
+    return req.method == "PUT" && req.path.size() > kPrefix.size() + kSuffix.size() &&
+           req.path.starts_with(kPrefix) && req.path.ends_with(kSuffix);
+}
 
 ApiContext::ApiContext(app::Services services_, AssetProvider& assets_, HttpConfig config_)
     : services(std::move(services_)), assets(assets_), config(std::move(config_)) {
@@ -109,6 +118,7 @@ HandlerResponse guardRequest(const ApiContext& ctx, const httplib::Request& req,
     if (req.path == kImportPath) {
         return HandlerResponse::Unhandled; // multipart, поток без лимита длины
     }
+    const bool thumbnail = isThumbnailUpload(req);
     if (req.has_header("Transfer-Encoding")) {
         return reject(res, 411, "length_required", "Требуется заголовок Content-Length");
     }
@@ -116,14 +126,20 @@ HandlerResponse guardRequest(const ApiContext& ctx, const httplib::Request& req,
         const auto text = req.get_header_value("Content-Length");
         std::uint64_t length = 0;
         const auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), length);
-        const auto maxBody = req.path == kImportPlanPath || req.path == kLinksPath
+        const auto maxBody = thumbnail ? domain::kThumbnailSourceLimit
+                             : req.path == kImportPlanPath || req.path == kLinksPath
                                  ? kMaxImportJsonBytes
                                  : ctx.config.maxJsonBody;
         if (ec != std::errc{} || length > maxBody) {
             return reject(res, 413, "payload_too_large", "Слишком большое тело запроса");
         }
     }
-    if (req.has_header("Content-Type")) {
+    if (thumbnail) {
+        const auto type = lower(req.get_header_value("Content-Type"));
+        if (!type.empty() && !type.starts_with("image/") && type != "application/octet-stream") {
+            return reject(res, 415, "unsupported_media_type", "Ожидается картинка (image/*)");
+        }
+    } else if (req.has_header("Content-Type")) {
         const auto type = lower(req.get_header_value("Content-Type"));
         if (type != "application/json" && !type.starts_with("application/json;")) {
             return reject(res, 415, "unsupported_media_type",

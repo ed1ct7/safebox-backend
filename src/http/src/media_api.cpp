@@ -3,6 +3,7 @@
 // Ссылка без блоба скачивается ярлыком "имя.url"; content у нее 404 (отдавать нечего)
 #include <algorithm>
 #include <array>
+#include <charconv>
 
 #include "dto.hpp"
 #include "safebox/domain/model/rules.hpp"
@@ -19,6 +20,44 @@ namespace {
         sendError(res, 400, "bad_request", "Некорректный идентификатор объекта");
     }
     return id;
+}
+
+// Необязательное число из запроса; пусто -> nullopt, мусор -> false.
+[[nodiscard]] bool queryNumber(const httplib::Request& req, const char* name,
+                               std::optional<std::uint64_t>& out) {
+    const auto text = req.get_param_value(name);
+    if (text.empty()) {
+        return true;
+    }
+    std::uint64_t value = 0;
+    const auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (ec != std::errc{} || ptr != text.data() + text.size()) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+// ?width=&height=&durationMs= к PUT миниатюры. Ширина без высоты - ошибка.
+[[nodiscard]] std::optional<app::MediaInfo> mediaInfo(const httplib::Request& req,
+                                                      httplib::Response& res) {
+    std::optional<std::uint64_t> width;
+    std::optional<std::uint64_t> height;
+    std::optional<std::uint64_t> duration;
+    if (!queryNumber(req, "width", width) || !queryNumber(req, "height", height) ||
+        !queryNumber(req, "durationMs", duration) || width.has_value() != height.has_value() ||
+        (width && (*width > UINT32_MAX || *height > UINT32_MAX))) {
+        sendError(res, 400, "bad_request",
+                  "Параметры width и height - оба целые, durationMs - целое");
+        return std::nullopt;
+    }
+    app::MediaInfo info;
+    if (width) {
+        info.dimensions = domain::Dimensions{static_cast<std::uint32_t>(*width),
+                                             static_cast<std::uint32_t>(*height)};
+    }
+    info.durationMs = duration;
+    return info;
 }
 
 [[nodiscard]] bool isInlineMime(std::string_view mime) {
@@ -104,6 +143,35 @@ void registerMediaApi(httplib::Server& server, ApiContext& ctx) {
                    res.status = 200;
                    res.set_content(std::string(domain::asChars(sink.bytes)), "image/jpeg");
                });
+
+    // Миниатюра от клиента: тело - JPEG/PNG/WebP, сервер перекодирует; ответ - запись.
+    server.Put("/api/v1/media/:id/thumbnail", [&ctx](const httplib::Request& req,
+                                                     httplib::Response& res) {
+        auto lease = requireApi(ctx, req, res);
+        if (!lease) {
+            return;
+        }
+        const auto id = pathId(req, res);
+        if (!id) {
+            return;
+        }
+        const auto info = mediaInfo(req, res);
+        if (!info) {
+            return;
+        }
+        if (req.body.empty()) {
+            sendError(res, 400, "bad_request", "Пустое тело: нужна картинка");
+            return;
+        }
+        const auto* data = reinterpret_cast<const std::byte*>(req.body.data());
+        auto entry =
+            ctx.services.importExport->setThumbnail(*lease, *id, {data, req.body.size()}, *info);
+        if (!entry) {
+            sendError(res, entry.error());
+            return;
+        }
+        sendJson(res, toJson(*entry));
+    });
 
     server.Get("/api/v1/media/:id/content", [&ctx](const httplib::Request& req,
                                                    httplib::Response& res) {
