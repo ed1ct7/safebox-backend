@@ -897,8 +897,8 @@ public:
         if (!catalog) {
             return std::unexpected(catalog.error());
         }
-        if (parent && (*catalog)->find(*parent) == nullptr) {
-            return fail(Error::Code::NotFound, "Объект не найден");
+        if (auto st = requireLive(**catalog, parent); !st) {
+            return std::unexpected(st.error());
         }
         VaultSession& session = ctx->session;
         auto sealer = ctx->sealer;
@@ -917,8 +917,8 @@ public:
             return std::unexpected(catalog.error());
         }
         const Catalog& cat = **catalog;
-        if (parent && cat.find(*parent) == nullptr) {
-            return fail(Error::Code::NotFound, "Объект не найден");
+        if (auto st = requireLive(cat, parent); !st) {
+            return std::unexpected(st.error());
         }
         std::map<std::optional<EntryId>, Siblings> siblings;
         const auto siblingsOf = [&](std::optional<EntryId> id) -> const Siblings& {

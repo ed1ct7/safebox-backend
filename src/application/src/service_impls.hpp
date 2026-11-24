@@ -32,6 +32,7 @@ public:
     virtual void start(std::weak_ptr<VaultSession> session) = 0;
 };
 [[nodiscard]] std::shared_ptr<ContentHashRunner> makeContentHashService(Ports ports);
+[[nodiscard]] std::shared_ptr<TrashService> makeTrashService(Ports ports);
 // Один фоновый поток на сервис.
 [[nodiscard]] std::shared_ptr<BackupService> makeBackupService(Ports ports, AppConfig config);
 

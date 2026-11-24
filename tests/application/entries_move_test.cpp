@@ -452,13 +452,20 @@ TEST_CASE("move resolves conflicts: keep both, replace, skip", "[entries][move]"
     CHECK(f.readContent(s, y1.id) == "Y1");
     CHECK(f.readContent(s, z1.id) == "Z1");
     CHECK(f.readContent(s, z2.id) == "Z2");
-    CHECK(f.services.entries->get(f.lease(s), y2.id).error().code == Code::NotFound);
     CHECK(f.entryNamed(s, "y.txt", dest.id).id == y1.id);
-    CHECK(f.store.blobCount(f.safePath()) == blobs - 1); // блоб замененной записи ушел
-    CHECK(f.store.compactions >= 1);
+    // замененная - в корзине, с данными
+    auto replaced = f.services.entries->get(f.lease(s), y2.id);
+    REQUIRE(replaced.has_value());
+    CHECK(replaced->meta.trashedAt.has_value());
+    CHECK(f.readContent(s, y2.id) == "Y2");
+    CHECK(f.store.blobCount(f.safePath()) == blobs);
+    auto purged = f.services.trash->purge(f.lease(s), {.all = true});
+    REQUIRE(purged.has_value());
+    CHECK(*purged == 1);
+    CHECK(f.store.blobCount(f.safePath()) == blobs - 1);
 }
 
-TEST_CASE("replacing a folder removes its whole subtree with the data", "[entries][move]") {
+TEST_CASE("replacing a folder puts its whole subtree in the trash", "[entries][move][trash]") {
     AppFixture f;
     auto s = f.createSafe();
     REQUIRE(f.importFiles(s, {{"F/inner.txt", "new"},
@@ -479,6 +486,14 @@ TEST_CASE("replacing a folder removes its whole subtree with the data", "[entrie
     CHECK(namesIn(f, s, dest.id) == Names{"F"});
     CHECK(f.entryNamed(s, "F", dest.id).id == incoming.id);
     CHECK(sorted(namesIn(f, s, incoming.id)) == Names{"inner.txt", "sub"});
+    auto trash = f.services.trash->list(f.lease(s), {});
+    REQUIRE(trash.has_value());
+    REQUIRE(trash->total == 1);
+    CHECK(trash->entries[0].entry.id == existing.id);
+    CHECK(f.store.blobCount(f.safePath()) == blobsBefore);
+    auto purged = f.services.trash->purge(f.lease(s), {.all = true});
+    REQUIRE(purged.has_value());
+    CHECK(*purged == 3); // F, old.txt, photo.jpg
     CHECK(f.services.entries->get(f.lease(s), existing.id).error().code == Code::NotFound);
     CHECK(f.store.blobCount(f.safePath()) == blobsBefore - 3); // old.txt, photo.jpg и его миниатюра
     CHECK(f.store.pendingBlobs(f.safePath()) == 0);
@@ -507,7 +522,10 @@ TEST_CASE("a moved entry that lay inside the replaced folder survives", "[entrie
     const auto survivor = f.entryNamed(s, "Box");
     CHECK(survivor.id == inner.id);
     CHECK(f.readContent(s, survivor.id) == "inner");
+    CHECK(f.services.entries->get(f.lease(s), outer.id)->meta.trashedAt.has_value());
+    REQUIRE(f.services.trash->purge(f.lease(s), {.all = true}).has_value());
     CHECK(f.services.entries->get(f.lease(s), outer.id).error().code == Code::NotFound);
+    CHECK(f.readContent(s, survivor.id) == "inner");
     CHECK(f.store.blobCount(f.safePath()) == 1);
 }
 
@@ -560,7 +578,7 @@ TEST_CASE("two entries with one name in a request: the second is kept as a copy"
         CHECK(sorted(namesIn(f, s, occupied.id)) == Names{"n (2).txt", "n.txt"});
         CHECK(f.entryNamed(s, "n.txt", occupied.id).id == first.id);
         CHECK(f.entryNamed(s, "n (2).txt", occupied.id).id == second.id);
-        CHECK(f.services.entries->get(f.lease(s), old.id).error().code == Code::NotFound);
+        CHECK(f.services.entries->get(f.lease(s), old.id)->meta.trashedAt.has_value());
     }
 }
 

@@ -83,13 +83,14 @@ public:
 
 // Name - имя без учета регистра, числа в имени - по значению ("2" раньше "10");
 // Added - createdAt; Modified - modifiedAt; Date - sourceDate, иначе sourceModifiedAt, иначе
-// createdAt; Size - size.
+// createdAt; Size - size; Trashed - trashedAt (вне корзины - 0).
 enum class SortKey {
     Name,
     Added,
     Modified,
     Date,
     Size,
+    Trashed,
 };
 
 // Папки всегда первыми; descending переворачивает только ключ, равные по ключу - по имени
@@ -142,8 +143,8 @@ struct MoveCmd {
 };
 
 // moved - записи, сменившие родителя (вместе с заменившими и переименованными), replaced -
-// удаленные ими записи, skipped - оставленные на месте по Skip. Запись, уже лежащая у
-// нужного родителя, нигде не учитывается.
+// записи, ушедшие от них в корзину, skipped - оставленные на месте по Skip. Запись, уже
+// лежащая у нужного родителя, нигде не учитывается.
 struct MoveResult {
     std::size_t moved = 0;
     std::size_t replaced = 0;
@@ -154,7 +155,8 @@ class EntriesService {
 public:
     virtual ~EntriesService() = default;
 
-    // parent - любая запись (у файла бывают вложения); нет такой -> NotFound.
+    // parent - любая запись (у файла бывают вложения, у записи в корзине - ее дети в корзине);
+    // нет такой -> NotFound. Корни корзины в списках не показываются (их выдает TrashService).
     [[nodiscard]] virtual Result<FolderListing>
     list(const Lease& lease, std::optional<domain::EntryId> parent, const ListOptions& options) = 0;
     // Все дети, папки первыми, затем по имени.
@@ -172,11 +174,56 @@ public:
     [[nodiscard]] virtual Result<std::vector<MoveConflict>>
     planMove(const Lease& lease, std::span<const domain::EntryId> ids,
              std::optional<domain::EntryId> parent) = 0;
-    // Перенос одной транзакцией; в себя или своего потомка нельзя (ничего не меняется).
+    // Перенос одной транзакцией; в себя или своего потомка нельзя (ничего не меняется). Ни
+    // переносимые, ни родитель не могут быть в корзине (InvalidArgument).
     [[nodiscard]] virtual Result<MoveResult> move(const Lease& lease, const MoveCmd& cmd) = 0;
-    // Записи вместе с поддеревьями одной транзакцией; -> сколько удалено всего.
+    // В корзину одной транзакцией: trashedAt ставится только корням выделения, потомки уходят с
+    // ними. Уже лежащие в корзине пропускаются. -> сколько записей ушло всего (с потомками).
     [[nodiscard]] virtual Result<std::size_t> remove(const Lease& lease,
                                                      std::span<const domain::EntryId> ids) = 0;
+};
+
+// TrashService - корзина: корни удаленных поддеревьев (meta.trashedAt), parent_id у них прежний.
+
+struct TrashedEntry {
+    domain::Entry entry;                    // meta.trashedAt задан
+    std::vector<domain::PathItem> location; // откуда удалена: крошки до родителя; пусто - корень
+};
+
+struct TrashListing {
+    std::vector<TrashedEntry> entries; // окно в порядке ListOptions
+    std::size_t total = 0;             // корней в корзине
+};
+
+struct RenamedEntry {
+    domain::EntryId id = 0;
+    std::string name; // новое имя
+};
+
+struct RestoreResult {
+    std::size_t restored = 0;
+    std::vector<RenamedEntry> renamed; // имя на месте уже было занято -> "имя (2)"
+};
+
+// Что стереть навсегда - одно из трех.
+struct PurgeCmd {
+    std::vector<domain::EntryId> ids;   // записи в корзине (корни или внутри них)
+    std::optional<std::int64_t> before; // корни, удаленные раньше этого момента (unix-мс)
+    bool all = false;                   // вся корзина
+};
+
+class TrashService {
+public:
+    virtual ~TrashService() = default;
+
+    [[nodiscard]] virtual Result<TrashListing> list(const Lease& lease,
+                                                    const ListOptions& options) = 0;
+    // Корни корзины - обратно к родителю одной транзакцией. Не корень корзины -> NotFound,
+    // родитель сам в корзине -> InvalidArgument (сначала восстановить его).
+    [[nodiscard]] virtual Result<RestoreResult> restore(const Lease& lease,
+                                                        std::span<const domain::EntryId> ids) = 0;
+    // Навсегда, с поддеревьями, одной транзакцией; -> сколько записей стерто всего.
+    [[nodiscard]] virtual Result<std::size_t> purge(const Lease& lease, const PurgeCmd& cmd) = 0;
 };
 
 // ImportExportService
@@ -503,6 +550,7 @@ struct Services {
     std::shared_ptr<TagsService> tags;
     std::shared_ptr<LinksService> links;
     std::shared_ptr<SettingsService> settings;
+    std::shared_ptr<TrashService> trash;
     std::shared_ptr<BackupService> backup;
     std::shared_ptr<ContentHashService> hashes; // последним: его поток останавливается первым
 };

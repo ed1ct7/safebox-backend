@@ -14,6 +14,7 @@ add_library(safebox-application STATIC
     src/links_service.cpp
     src/content_hashes.cpp
     src/backup_service.cpp
+    src/trash_service.cpp
     src/settings_service.cpp
     src/sealing.cpp
     src/factory.cpp

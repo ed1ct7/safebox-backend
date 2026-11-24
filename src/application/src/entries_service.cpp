@@ -1,8 +1,6 @@
-// EntriesService: список любой записи, дерево папок, правка полей, перенос, удаление.
+// EntriesService: список любой записи, дерево папок, правка полей, перенос, удаление в корзину.
 // Перенос: сначала весь план по снимку каталога (ошибка -> ничего не изменено), потом одна
-// транзакция. Замененные записи удаляются после переноса: перенесенная запись, лежавшая внутри
-// замененной, к этому моменту уже вне ее поддерева.
-// после удаления делаем incremental_vacuum, чтобы файл уменьшился
+// транзакция. Замененные записи уходят в корзину (на прежнем месте, рядом с новой).
 #include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
@@ -38,6 +36,9 @@ Result<MovePlan> planMoveOn(const VaultSession& session, const Catalog& cat,
     if (parent && cat.find(*parent) == nullptr) {
         return fail(Error::Code::NotFound, "Объект назначения не найден");
     }
+    if (auto st = requireLive(cat, parent); !st) {
+        return std::unexpected(st.error());
+    }
     std::vector<const Catalog::Node*> nodes;
     std::unordered_set<EntryId> seen;
     for (const auto id : ids) {
@@ -47,6 +48,9 @@ Result<MovePlan> planMoveOn(const VaultSession& session, const Catalog& cat,
         const auto* node = cat.find(id);
         if (node == nullptr) {
             return fail(Error::Code::NotFound, "Объект не найден");
+        }
+        if (cat.inTrash(id)) {
+            return fail(Error::Code::InvalidArgument, "Объект в корзине");
         }
         if (parent && cat.isAncestorOrSelf(id, *parent)) {
             return fail(Error::Code::InvalidArgument,
@@ -323,6 +327,7 @@ public:
             return result;
         }
         const Sealer& sealer = *ctx->sealer;
+        const auto now = domain::toUnixMillis(ports_.clock.now());
         CatalogChanges changed;
         {
             auto uow = ports_.store.begin();
@@ -359,8 +364,8 @@ public:
                 }
             }
             for (const auto id : replaced) {
-                if (auto removed = (*uow)->entries().removeSubtree(id); !removed) {
-                    return std::unexpected(removed.error());
+                if (auto st = markTrashed((*uow)->entries(), sealer, id, now); !st) {
+                    return std::unexpected(st.error());
                 }
                 ++result.replaced;
             }
@@ -369,9 +374,6 @@ public:
             }
         }
         ctx->session.catalogChanged(changed);
-        if (result.replaced > 0) {
-            (void)ports_.store.compact();
-        }
         return result;
     }
 
@@ -383,29 +385,70 @@ public:
         if (!ctx) {
             return std::unexpected(ctx.error());
         }
-        std::unordered_set<EntryId> removed;
+        auto catalog = catalogOf(*ctx, ports_.store);
+        if (!catalog) {
+            return std::unexpected(catalog.error());
+        }
+        const Catalog& cat = **catalog;
+        const std::unordered_set<EntryId> selected(ids.begin(), ids.end());
+        std::vector<EntryId> roots; // выделенные без выделенного предка и не в корзине
+        for (const auto id : selected) {
+            const auto* node = cat.find(id);
+            if (node == nullptr) {
+                return fail(Error::Code::NotFound, "Объект не найден");
+            }
+            if (cat.inTrash(id)) {
+                continue;
+            }
+            bool underSelected = false;
+            std::unordered_set<EntryId> seen{id};
+            for (auto up = node->entry.parentId; up && seen.insert(*up).second;) {
+                if (selected.contains(*up)) {
+                    underSelected = true;
+                    break;
+                }
+                const auto* parent = cat.find(*up);
+                up = parent == nullptr ? std::nullopt : parent->entry.parentId;
+            }
+            if (!underSelected) {
+                roots.push_back(id);
+            }
+        }
+        if (roots.empty()) {
+            return std::size_t{0};
+        }
+        std::sort(roots.begin(), roots.end());
+        std::size_t count = 0; // с потомками: так отвечали и до корзины
+        for (const auto id : roots) {
+            std::vector<EntryId> stack{id};
+            std::unordered_set<EntryId> seen;
+            while (!stack.empty()) {
+                const auto current = stack.back();
+                stack.pop_back();
+                if (seen.insert(current).second) {
+                    ++count;
+                    const auto& children = cat.childrenOf(current);
+                    stack.insert(stack.end(), children.begin(), children.end());
+                }
+            }
+        }
+        const auto now = domain::toUnixMillis(ports_.clock.now());
         {
             auto uow = ports_.store.begin();
             if (!uow) {
                 return std::unexpected(uow.error());
             }
-            for (const auto id : ids) {
-                if (removed.contains(id)) {
-                    continue; // уже ушла вместе с выделенной папкой-предком
+            for (const auto id : roots) {
+                if (auto st = markTrashed((*uow)->entries(), *ctx->sealer, id, now); !st) {
+                    return std::unexpected(st.error());
                 }
-                auto result = (*uow)->entries().removeSubtree(id);
-                if (!result) {
-                    return std::unexpected(result.error());
-                }
-                removed.insert(result->entries.begin(), result->entries.end());
             }
             if (auto st = (*uow)->commit(); !st) {
                 return std::unexpected(st.error());
             }
         }
-        ctx->session.catalogChanged({.entries = {ids.begin(), ids.end()}});
-        (void)ports_.store.compact(); // место вернется файлу; сбой здесь не отменяет удаление
-        return removed.size();
+        ctx->session.catalogChanged({.entries = std::move(roots)});
+        return count;
     }
 
 private:

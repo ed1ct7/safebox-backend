@@ -106,9 +106,12 @@ public:
                 stack.insert(stack.end(), children.begin(), children.end());
             }
         } else {
+            const auto trashed = cat.trashedIds(); // корзина ищется только через within
             scope.reserve(cat.nodes().size());
             for (const auto& [id, node] : cat.nodes()) {
-                scope.push_back(node.get());
+                if (!trashed.contains(id)) {
+                    scope.push_back(node.get());
+                }
             }
         }
 

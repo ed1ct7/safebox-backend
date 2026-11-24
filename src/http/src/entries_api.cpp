@@ -357,6 +357,94 @@ void registerEntriesApi(httplib::Server& server, ApiContext& ctx) {
         }
         sendJson(res, Json{{"updated", *updated}});
     });
+
+    // Корзина: корни удаленных поддеревьев. По умолчанию - недавно удаленные первыми.
+    server.Get("/api/v1/trash", [&ctx](const httplib::Request& req, httplib::Response& res) {
+        auto lease = requireApi(ctx, req, res);
+        if (!lease) {
+            return;
+        }
+        app::ListOptions options;
+        if (!req.has_param("sort")) {
+            options.sort = app::SortKey::Trashed;
+            options.descending = true;
+        }
+        if (!readListOptions(req, options, res)) {
+            return;
+        }
+        auto listing = ctx.services.trash->list(*lease, options);
+        if (!listing) {
+            sendError(res, listing.error());
+            return;
+        }
+        sendJson(res, toJson(*listing));
+    });
+
+    server.Post("/api/v1/trash/restore",
+                [&ctx](const httplib::Request& req, httplib::Response& res) {
+                    auto lease = requireApi(ctx, req, res);
+                    if (!lease) {
+                        return;
+                    }
+                    auto body = readJsonObject(req, res);
+                    if (!body) {
+                        return;
+                    }
+                    const auto ids = readIds(*body, res);
+                    if (!ids) {
+                        return;
+                    }
+                    auto restored = ctx.services.trash->restore(*lease, *ids);
+                    if (!restored) {
+                        sendError(res, restored.error());
+                        return;
+                    }
+                    sendJson(res, toJson(*restored));
+                });
+
+    // Навсегда: {"ids": [...]} | {"before": unix-мс} | {"all": true}.
+    server.Post("/api/v1/trash/purge", [&ctx](const httplib::Request& req, httplib::Response& res) {
+        auto lease = requireApi(ctx, req, res);
+        if (!lease) {
+            return;
+        }
+        auto body = readJsonObject(req, res);
+        if (!body) {
+            return;
+        }
+        app::PurgeCmd cmd;
+        if (body->contains("ids")) {
+            auto ids = readIds(*body, res);
+            if (!ids) {
+                return;
+            }
+            if (ids->empty()) {
+                sendError(res, 400, "bad_request", "Поле 'ids' пустое");
+                return;
+            }
+            cmd.ids = std::move(*ids);
+        }
+        if (const auto it = body->find("before"); it != body->end()) {
+            if (!it->is_number_integer()) {
+                sendError(res, 400, "bad_request", "Поле 'before' должно быть временем в мс");
+                return;
+            }
+            cmd.before = it->get<std::int64_t>();
+        }
+        if (const auto it = body->find("all"); it != body->end()) {
+            if (!it->is_boolean() || !it->get<bool>()) {
+                sendError(res, 400, "bad_request", "Поле 'all' может быть только true");
+                return;
+            }
+            cmd.all = true;
+        }
+        auto purged = ctx.services.trash->purge(*lease, cmd);
+        if (!purged) {
+            sendError(res, purged.error());
+            return;
+        }
+        sendJson(res, Json{{"purged", *purged}});
+    });
 }
 
 } // namespace safebox::http

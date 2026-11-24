@@ -80,7 +80,8 @@ TEST_CASE("update re-seals the name and survives lock/unlock", "[entries][UF-10]
     CHECK(f.readContent(*again, reopened.id) == "data");
 }
 
-TEST_CASE("remove deletes subtrees with their data", "[entries][UF-9][UF-10]") {
+TEST_CASE("remove puts subtrees in the trash, purge deletes them with their data",
+          "[entries][trash][UF-9][UF-10]") {
     AppFixture f;
     auto s = f.createSafe();
     REQUIRE(f.importFiles(s, {{"keep.txt", "k"},
@@ -95,14 +96,23 @@ TEST_CASE("remove deletes subtrees with their data", "[entries][UF-9][UF-10]") {
     const domain::EntryId selection[] = {a.id, trip.id}; // файл внутри выделенной папки
     auto removed = f.services.entries->remove(f.lease(s), selection);
     REQUIRE(removed.has_value());
-    CHECK(*removed == 5);                                      // trip, inner, a.jpg, b.txt, c.txt
-    CHECK(f.store.blobCount(f.safePath()) == blobsBefore - 4); // 3 файла + миниатюра a.jpg
-    CHECK(f.store.compactions >= 1);
-
+    CHECK(*removed == 5);                                  // trip, inner, a.jpg, b.txt, c.txt
+    CHECK(f.store.blobCount(f.safePath()) == blobsBefore); // в корзине данные целы
     auto root = f.services.entries->list(f.lease(s), std::nullopt);
     REQUIRE(root.has_value());
     REQUIRE(root->entries.size() == 1);
     CHECK(root->entries[0].name == "keep.txt");
+    auto trash = f.services.trash->list(f.lease(s), {});
+    REQUIRE(trash.has_value());
+    REQUIRE(trash->total == 1); // корень корзины - только папка, файл внутри ушел с ней
+    CHECK(trash->entries[0].entry.id == trip.id);
+    CHECK(f.readContent(s, a.id).size() == 1500);
+
+    auto purged = f.services.trash->purge(f.lease(s), {.ids = {trip.id}});
+    REQUIRE(purged.has_value());
+    CHECK(*purged == 5);
+    CHECK(f.store.blobCount(f.safePath()) == blobsBefore - 4); // 3 файла + миниатюра a.jpg
+    CHECK(f.store.compactions >= 1);
     auto gone = f.services.entries->get(f.lease(s), a.id);
     REQUIRE_FALSE(gone.has_value());
     CHECK(gone.error().code == Code::NotFound);

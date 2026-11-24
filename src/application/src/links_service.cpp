@@ -205,8 +205,8 @@ public:
         if (!catalog) {
             return std::unexpected(catalog.error());
         }
-        if (cmd.parent && (*catalog)->find(*cmd.parent) == nullptr) {
-            return fail(Error::Code::NotFound, "Объект не найден");
+        if (auto st = requireLive(**catalog, cmd.parent); !st) {
+            return std::unexpected(st.error());
         }
 
         CreateLinksResult result;

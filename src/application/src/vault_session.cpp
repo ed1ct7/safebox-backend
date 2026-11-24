@@ -206,7 +206,7 @@ const Catalog::Node* Catalog::findBySha256(const domain::Sha256& hash) const {
     const Node* best = nullptr;
     auto [it, end] = bySha256_.equal_range(hash);
     for (; it != end; ++it) {
-        if (best == nullptr || it->second < best->entry.id) {
+        if ((best == nullptr || it->second < best->entry.id) && !inTrash(it->second)) {
             best = find(it->second);
         }
     }
@@ -231,18 +231,22 @@ void Catalog::addTag(domain::Tag tag) {
 void Catalog::finalize() {
     children_.clear();
     roots_.clear();
+    trash_.clear();
     hasCycles_ = false;
     for (const auto& [id, node] : nodes_) {
         const auto& parent = node->entry.parentId;
-        if (parent && *parent != id && nodes_.contains(*parent)) {
+        if (node->entry.meta.trashedAt) {
+            trash_.push_back(id);
+        } else if (parent && *parent != id && nodes_.contains(*parent)) {
             children_[*parent].push_back(id);
         } else {
             roots_.push_back(id);
         }
     }
-    // Узлы, недостижимые из корня (цикл в подмененном parent_id), - в корень.
+    // Узлы, недостижимые из корня и корзины (цикл в подмененном parent_id), - в корень.
     std::unordered_set<EntryId> reachable;
     std::vector<EntryId> stack(roots_.begin(), roots_.end());
+    stack.insert(stack.end(), trash_.begin(), trash_.end());
     while (!stack.empty()) {
         const auto id = stack.back();
         stack.pop_back();
@@ -261,6 +265,7 @@ void Catalog::finalize() {
     }
     const auto less = [this](EntryId a, EntryId b) { return before(a, b); };
     std::sort(roots_.begin(), roots_.end(), less);
+    std::sort(trash_.begin(), trash_.end(), less);
     for (auto& [parent, list] : children_) {
         std::sort(list.begin(), list.end(), less);
     }
@@ -271,6 +276,9 @@ bool Catalog::before(EntryId a, EntryId b) const {
 }
 
 std::vector<EntryId>* Catalog::placeOf(const Node& node, bool create) {
+    if (node.entry.meta.trashedAt) {
+        return &trash_;
+    }
     const auto& parent = node.entry.parentId;
     if (!parent || *parent == node.entry.id || !nodes_.contains(*parent)) {
         return &roots_;
@@ -298,28 +306,46 @@ std::shared_ptr<Catalog> Catalog::clone() const {
     return std::shared_ptr<Catalog>(new Catalog(*this));
 }
 
-void Catalog::erase(std::span<const EntryId> ids, const std::unordered_set<EntryId>& keep) {
-    std::vector<EntryId> stack;
-    for (const auto id : ids) {
-        if (!nodes_.contains(id)) {
-            continue; // уже ушла с предком
-        }
-        unlink(id);
-        stack.assign(1, id);
-        while (!stack.empty()) {
-            const auto current = stack.back();
-            stack.pop_back();
-            if (const auto it = children_.find(current); it != children_.end()) {
-                for (const auto child : it->second) {
-                    if (!keep.contains(child)) {
-                        stack.push_back(child);
-                    } // оставленную upsert поставит на новое место
-                }
-                children_.erase(it);
+void Catalog::eraseSubtree(EntryId id, const std::unordered_set<EntryId>& keep,
+                           std::unordered_set<EntryId>& erased) {
+    unlink(id);
+    std::vector<EntryId> stack{id};
+    while (!stack.empty()) {
+        const auto current = stack.back();
+        stack.pop_back();
+        if (const auto it = children_.find(current); it != children_.end()) {
+            for (const auto child : it->second) {
+                if (!keep.contains(child)) {
+                    stack.push_back(child);
+                } // оставленную upsert поставит на новое место
             }
-            if (const auto node = nodes_.find(current); node != nodes_.end()) {
-                unindex(*node->second);
-                nodes_.erase(node);
+            children_.erase(it);
+        }
+        if (const auto node = nodes_.find(current); node != nodes_.end()) {
+            unindex(*node->second);
+            nodes_.erase(node);
+            erased.insert(current);
+        }
+    }
+}
+
+void Catalog::erase(std::span<const EntryId> ids, const std::unordered_set<EntryId>& keep) {
+    std::unordered_set<EntryId> erased;
+    for (const auto id : ids) {
+        if (nodes_.contains(id)) { // иначе уже ушла с предком
+            eraseSubtree(id, keep, erased);
+        }
+    }
+    // Корни корзины внутри ушедших поддеревьев не в списках детей - ищем по родителю, пока
+    // находятся (корзина в корзине).
+    for (bool more = !erased.empty() && !trash_.empty(); more;) {
+        more = false;
+        const auto roots = trash_;
+        for (const auto id : roots) {
+            const auto& parent = nodes_.at(id)->entry.parentId;
+            if (parent && erased.contains(*parent) && !keep.contains(id)) {
+                eraseSubtree(id, keep, erased);
+                more = true;
             }
         }
     }
@@ -372,6 +398,37 @@ void Catalog::replaceTags(std::vector<domain::TagCategory> categories,
 std::size_t Catalog::childCount(EntryId id) const {
     const auto it = children_.find(id);
     return it == children_.end() ? 0 : it->second.size();
+}
+
+bool Catalog::inTrash(EntryId id) const {
+    std::unordered_set<EntryId> seen;
+    std::optional<EntryId> current = id;
+    while (current && seen.insert(*current).second) {
+        const Node* node = find(*current);
+        if (node == nullptr) {
+            break;
+        }
+        if (node->entry.meta.trashedAt) {
+            return true;
+        }
+        current = node->entry.parentId;
+    }
+    return false;
+}
+
+std::unordered_set<EntryId> Catalog::trashedIds() const {
+    std::unordered_set<EntryId> out;
+    std::vector<EntryId> stack(trash_.begin(), trash_.end());
+    while (!stack.empty()) {
+        const auto id = stack.back();
+        stack.pop_back();
+        if (!out.insert(id).second) {
+            continue;
+        }
+        const auto& children = childrenOf(id);
+        stack.insert(stack.end(), children.begin(), children.end());
+    }
+    return out;
 }
 
 const Catalog::Node* Catalog::find(EntryId id) const {
@@ -917,6 +974,44 @@ domain::Result<domain::BlobId> writeBlob(domain::BlobStore& blobs, const Sealer&
         return discard(st.error());
     }
     return id;
+}
+
+domain::Status requireLive(const Catalog& catalog, std::optional<EntryId> id) {
+    if (!id) {
+        return {};
+    }
+    if (catalog.find(*id) == nullptr) {
+        return domain::fail(Error::Code::NotFound, "Объект не найден");
+    }
+    if (catalog.inTrash(*id)) {
+        return domain::fail(Error::Code::InvalidArgument, "Объект в корзине");
+    }
+    return {};
+}
+
+domain::Status markTrashed(domain::EntryRepository& entries, const Sealer& sealer, EntryId id,
+                           std::optional<std::int64_t> at, const std::string* rename) {
+    auto record = entries.get(id);
+    if (!record) {
+        return std::unexpected(record.error());
+    }
+    auto entry = sealer.openEntry(*record);
+    if (!entry) {
+        return std::unexpected(entry.error());
+    }
+    entry->meta.trashedAt = at;
+    auto encMeta = sealer.sealMeta(id, entry->meta);
+    if (!encMeta) {
+        return std::unexpected(encMeta.error());
+    }
+    if (rename == nullptr) {
+        return entries.updateSealed(id, record->encName, *encMeta);
+    }
+    auto encName = sealer.sealName(id, *rename);
+    if (!encName) {
+        return std::unexpected(encName.error());
+    }
+    return entries.updateSealed(id, *encName, *encMeta);
 }
 
 domain::Entry describeEntry(const VaultSession& session, const Catalog& catalog,

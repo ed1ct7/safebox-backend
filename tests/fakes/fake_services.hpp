@@ -504,6 +504,41 @@ public:
     app::BackupProgress value;
 };
 
+class FakeTrashService final : public app::TrashService {
+public:
+    app::Result<app::TrashListing> list(const app::Lease&,
+                                        const app::ListOptions& options) override {
+        lastListOptions = options;
+        if (error) {
+            return std::unexpected(*error);
+        }
+        return listing;
+    }
+    app::Result<app::RestoreResult> restore(const app::Lease&,
+                                            std::span<const domain::EntryId> ids) override {
+        lastIds.assign(ids.begin(), ids.end());
+        if (error) {
+            return std::unexpected(*error);
+        }
+        return restored;
+    }
+    app::Result<std::size_t> purge(const app::Lease&, const app::PurgeCmd& cmd) override {
+        lastPurge = cmd;
+        if (error) {
+            return std::unexpected(*error);
+        }
+        return purged;
+    }
+
+    std::optional<domain::Error> error;
+    app::TrashListing listing;
+    app::RestoreResult restored;
+    std::size_t purged = 0;
+    app::ListOptions lastListOptions;
+    std::vector<domain::EntryId> lastIds;
+    app::PurgeCmd lastPurge;
+};
+
 struct FakeServices {
     std::shared_ptr<FakeSafeService> safe = std::make_shared<FakeSafeService>();
     std::shared_ptr<FakeEntriesService> entries = std::make_shared<FakeEntriesService>();
@@ -513,11 +548,12 @@ struct FakeServices {
     std::shared_ptr<FakeTagsService> tags = std::make_shared<FakeTagsService>();
     std::shared_ptr<FakeLinksService> links = std::make_shared<FakeLinksService>();
     std::shared_ptr<FakeSettingsService> settings = std::make_shared<FakeSettingsService>();
+    std::shared_ptr<FakeTrashService> trash = std::make_shared<FakeTrashService>();
     std::shared_ptr<FakeBackupService> backup = std::make_shared<FakeBackupService>();
     std::shared_ptr<FakeContentHashService> hashes = std::make_shared<FakeContentHashService>();
 
     [[nodiscard]] app::Services services() const {
-        return {safe, entries, importExport, search, tags, links, settings, backup, hashes};
+        return {safe, entries, importExport, search, tags, links, settings, trash, backup, hashes};
     }
 };
 

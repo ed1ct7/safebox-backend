@@ -81,6 +81,8 @@ template <typename T>
         return threeWay(dateOf(a), dateOf(b));
     case SortKey::Size:
         return threeWay(a.size, b.size);
+    case SortKey::Trashed:
+        return threeWay(a.trashedAt.value_or(0), b.trashedAt.value_or(0));
     }
     return 0;
 }

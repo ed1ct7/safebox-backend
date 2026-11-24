@@ -64,10 +64,14 @@ const Catalog::TagNode* tagNamed(const Catalog& cat, CategoryId category, const 
     return nullptr;
 }
 
-// Сколько записей держит каждый тег напрямую.
+// Сколько записей вне корзины держит каждый тег напрямую.
 std::unordered_map<TagId, std::size_t> directCounts(const Catalog& cat) {
     std::unordered_map<TagId, std::size_t> counts;
+    const auto trashed = cat.trashedIds();
     for (const auto& [id, node] : cat.nodes()) {
+        if (trashed.contains(id)) {
+            continue;
+        }
         for (const auto& assignment : node->entry.meta.tags) {
             ++counts[assignment.tagId];
         }

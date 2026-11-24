@@ -503,6 +503,61 @@ TEST_CASE("organizing over HTTP: description, move with conflicts, attachments, 
           "заметка.txt");
 }
 
+TEST_CASE("trash over HTTP: delete, survive a reopen, restore, purge", "[integration][trash]") {
+    test::TempDir dir;
+    Stack stack(dir.path());
+    auto c = stack.client();
+    const auto session =
+        post(c, "/api/v1/safe/create",
+             {{"path", "Корзина"}, {"password", "пароль-1"}, {"confirm", "пароль-1"}}, 201);
+    auto token = session["token"].get<std::string>();
+    httplib::UploadFormDataItems items = {
+        {"file", "один", "Архив/один.txt", "text/plain"},
+        {"file", "два", "Архив/два.txt", "text/plain"},
+        {"file", "три", "три.txt", "text/plain"},
+    };
+    auto imported = c.Post("/api/v1/import", bearer(token), items);
+    REQUIRE(imported);
+    REQUIRE(imported->status == 200);
+    const auto idOf = [](const Json& entry) { return entry["id"].get<std::int64_t>(); };
+    const auto archive = byName(get(c, "/api/v1/entries", token), "Архив");
+    const auto one = byName(
+        get(c, "/api/v1/entries?parentId=" + std::to_string(idOf(archive)), token), "один.txt");
+
+    auto removed = c.Delete("/api/v1/entries/" + std::to_string(idOf(archive)), bearer(token));
+    REQUIRE(removed);
+    REQUIRE(removed->status == 200);
+    CHECK(Json::parse(removed->body)["removed"] == 3);
+    CHECK(get(c, "/api/v1/entries", token)["entries"].size() == 1);
+    // в корзине содержимое читается
+    auto content = c.Get("/api/v1/media/" + std::to_string(idOf(one)) + "/content", bearer(token));
+    REQUIRE(content);
+    CHECK(content->body == "один");
+
+    post(c, "/api/v1/safe/lock", Json::object(), 204, bearer(token));
+    token = post(c, "/api/v1/safe/unlock",
+                 {{"path", session["safe"]["path"]}, {"password", "пароль-1"}}, 200)["token"]
+                .get<std::string>();
+    auto trash = get(c, "/api/v1/trash", token);
+    REQUIRE(trash["total"] == 1);
+    CHECK(trash["entries"][0]["name"] == "Архив");
+    CHECK(trash["entries"][0]["trashedAt"].is_number_integer());
+    CHECK(trash["entries"][0]["location"].empty());
+
+    const auto restored =
+        post(c, "/api/v1/trash/restore", {{"ids", {idOf(archive)}}}, 200, bearer(token));
+    CHECK(restored == Json({{"restored", 1}, {"renamed", Json::array()}}));
+    CHECK(get(c, "/api/v1/entries", token)["entries"].size() == 2);
+    CHECK(get(c, "/api/v1/trash", token)["total"] == 0);
+
+    post(c, "/api/v1/entries/delete", {{"ids", {idOf(archive)}}}, 200, bearer(token));
+    CHECK(post(c, "/api/v1/trash/purge", {{"all", true}}, 200, bearer(token))["purged"] == 3);
+    CHECK(get(c, "/api/v1/trash", token)["total"] == 0);
+    auto purged = c.Get("/api/v1/media/" + std::to_string(idOf(one)) + "/content", bearer(token));
+    REQUIRE(purged);
+    CHECK(purged->status == 404);
+}
+
 TEST_CASE("tags over HTTP: create, assign, filter, manage, survive a reopen",
           "[integration][UF-16][UF-17][UF-18]") {
     test::TempDir dir;

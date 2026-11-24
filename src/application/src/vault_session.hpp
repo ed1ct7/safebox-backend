@@ -74,13 +74,15 @@ public:
     void addCategory(domain::TagCategory category);
     void addTag(domain::Tag tag);
     // Списки детей (у любой записи, не только у папки): папки первыми, дальше по имени.
-    // Сироты (родитель не найден) и циклы показываются в корне, а не теряются.
+    // Сироты (родитель не найден) и циклы показываются в корне, а не теряются. Корни корзины
+    // (meta.trashedAt) - не в списке родителя, а в trash(); их потомки - в своих списках.
     void finalize();
 
     // Правки готового каталога (после finalize). Копия делит узлы с оригиналом.
     [[nodiscard]] std::shared_ptr<Catalog> clone() const;
-    // Записи, которых больше нет в сейфе, уходят с потомками; спуск останавливается на keep -
-    // записях, которые есть в сейфе (их могли перенести из удаленной папки, и детей с ними).
+    // Записи, которых больше нет в сейфе, уходят с потомками (и с корнями корзины внутри);
+    // спуск останавливается на keep - записях, которые есть в сейфе (их могли перенести из
+    // удаленной папки, и детей с ними).
     void erase(std::span<const domain::EntryId> ids,
                const std::unordered_set<domain::EntryId>& keep);
     // Новые и измененные записи встают на места по своим parentId. false - правку этим путем
@@ -90,15 +92,22 @@ public:
     void replaceTags(std::vector<domain::TagCategory> categories, std::vector<domain::Tag> tags);
 
     [[nodiscard]] const Node* find(domain::EntryId id) const;
+    // Дети без корней корзины (у записи в корзине - ее дети, они тоже в корзине).
     [[nodiscard]] const std::vector<domain::EntryId>&
     childrenOf(std::optional<domain::EntryId> parent) const;
+    // Корни корзины: записи с meta.trashedAt, по имени.
+    [[nodiscard]] const std::vector<domain::EntryId>& trash() const noexcept { return trash_; }
+    // Запись или один из ее предков в корзине.
+    [[nodiscard]] bool inTrash(domain::EntryId id) const;
+    // Все записи в корзине (корни с потомками).
+    [[nodiscard]] std::unordered_set<domain::EntryId> trashedIds() const;
     // Путь от корня до id включительно; устойчив к циклам в parent_id.
     [[nodiscard]] std::vector<domain::PathItem> pathTo(domain::EntryId id) const;
     [[nodiscard]] const std::unordered_map<domain::EntryId, NodePtr>& nodes() const noexcept {
         return nodes_;
     }
     [[nodiscard]] std::size_t childCount(domain::EntryId id) const; // прямых детей
-    // Запись с таким содержимым (с меньшим id, если их несколько); nullptr - нет.
+    // Запись с таким содержимым вне корзины (с меньшим id, если их несколько); nullptr - нет.
     [[nodiscard]] const Node* findBySha256(const domain::Sha256& hash) const;
 
     // Теги с inherit у предков (устойчиво к циклам): ближайший предок побеждает, теги, уже
@@ -125,10 +134,13 @@ private:
     Catalog(const Catalog&) = default; // для clone: узлы общие, категории и теги - копии
 
     [[nodiscard]] bool before(domain::EntryId a, domain::EntryId b) const;
-    // Список, в котором стоит запись: дети родителя или корень (родителя нет в каталоге);
-    // nullptr - у родителя нет списка детей (create = false).
+    // Список, в котором стоит запись: корзина, дети родителя или корень (родителя нет в
+    // каталоге); nullptr - у родителя нет списка детей (create = false).
     [[nodiscard]] std::vector<domain::EntryId>* placeOf(const Node& node, bool create);
     void unlink(domain::EntryId id); // из списка по текущему узлу; нет там - ничего
+    // Запись с потомками (кроме keep) - из узлов и списков; ушедшие - в erased.
+    void eraseSubtree(domain::EntryId id, const std::unordered_set<domain::EntryId>& keep,
+                      std::unordered_set<domain::EntryId>& erased);
     void wipeTags() noexcept;
     void index(const Node& node);   // в bySha256_, если хеш известен
     void unindex(const Node& node); // из bySha256_
@@ -138,6 +150,7 @@ private:
     std::unordered_map<domain::TagId, TagNode> tags_;
     std::unordered_map<domain::EntryId, std::vector<domain::EntryId>> children_;
     std::vector<domain::EntryId> roots_;
+    std::vector<domain::EntryId> trash_;
     std::unordered_multimap<domain::Sha256, domain::EntryId, Sha256Hash> bySha256_;
     bool hasCycles_ = false; // в файле цикл parent_id: правки только полной перестройкой
 };
@@ -262,6 +275,13 @@ struct OperationContext {
 [[nodiscard]] domain::Result<domain::BlobId>
 writeBlob(domain::BlobStore& blobs, const Sealer& sealer, std::uint32_t chunkSize,
           domain::KeyPurpose purpose, std::span<const std::byte> data);
+// Родитель для новых и перенесенных записей: nullopt (корень) или запись вне корзины.
+// Нет записи -> NotFound, в корзине -> InvalidArgument.
+[[nodiscard]] domain::Status requireLive(const Catalog& catalog, std::optional<domain::EntryId> id);
+// В текущей транзакции: meta.trashedAt = at (nullopt - из корзины), rename - новое имя.
+[[nodiscard]] domain::Status markTrashed(domain::EntryRepository& entries, const Sealer& sealer,
+                                         domain::EntryId id, std::optional<std::int64_t> at,
+                                         const std::string* rename = nullptr);
 // Запись для ответа: Catalog::describe() и признак очереди предпросмотра из сессии.
 [[nodiscard]] domain::Entry describeEntry(const VaultSession& session, const Catalog& catalog,
                                           const Catalog::Node& node);

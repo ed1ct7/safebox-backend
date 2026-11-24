@@ -420,6 +420,63 @@ TEST_CASE("backup starts in the background and shows up in the status", "[http][
               .status == 401);
 }
 
+TEST_CASE("trash endpoints: list newest first, restore, purge one of three ways", "[http][trash]") {
+    HttpFixture f;
+    domain::Entry gone;
+    gone.id = 7;
+    gone.parentId = 1;
+    gone.name = "старое.txt";
+    gone.meta.trashedAt = 1700000000000;
+    f.fakes.trash->listing = {.entries = {{gone, {{1, "Отпуск"}}}}, .total = 3};
+
+    auto listed = f.api("GET", "/api/v1/trash");
+    REQUIRE(listed.status == 200);
+    CHECK(f.fakes.trash->lastListOptions.sort == app::SortKey::Trashed);
+    CHECK(f.fakes.trash->lastListOptions.descending);
+    const auto body = listed.json();
+    CHECK(body["total"] == 3);
+    REQUIRE(body["entries"].size() == 1);
+    CHECK(body["entries"][0]["id"] == 7);
+    CHECK(body["entries"][0]["trashedAt"] == 1700000000000);
+    CHECK(body["entries"][0]["location"][0]["name"] == "Отпуск");
+    CHECK(f.api("GET", "/api/v1/trash?sort=name").status == 200);
+    CHECK(f.fakes.trash->lastListOptions.sort == app::SortKey::Name);
+    CHECK_FALSE(f.fakes.trash->lastListOptions.descending);
+    CHECK(f.api("GET", "/api/v1/trash?offset=10&limit=5").status == 200);
+    CHECK(f.fakes.trash->lastListOptions.offset == 10);
+    CHECK(f.fakes.trash->lastListOptions.limit == 5);
+    CHECK(f.api("GET", "/api/v1/trash?sort=color").status == 400);
+    CHECK(f.request("GET", "/api/v1/trash").status == 401);
+    // запись вне корзины - без поля trashedAt
+    CHECK_FALSE(f.api("GET", "/api/v1/entries").json()["entries"][0].contains("trashedAt"));
+
+    f.fakes.trash->restored = {.restored = 2, .renamed = {{7, "старое (2).txt"}}};
+    auto restored = f.api("POST", "/api/v1/trash/restore", R"({"ids":[7,8]})");
+    REQUIRE(restored.status == 200);
+    CHECK(f.fakes.trash->lastIds == std::vector<domain::EntryId>{7, 8});
+    CHECK(restored.json() ==
+          http::Json::parse(R"({"restored":2,"renamed":[{"id":7,"name":"старое (2).txt"}]})"));
+    CHECK(f.api("POST", "/api/v1/trash/restore", "{}").status == 400);
+
+    f.fakes.trash->purged = 4;
+    auto purged = f.api("POST", "/api/v1/trash/purge", R"({"ids":[7]})");
+    REQUIRE(purged.status == 200);
+    CHECK(purged.json()["purged"] == 4);
+    CHECK(f.fakes.trash->lastPurge.ids == std::vector<domain::EntryId>{7});
+    REQUIRE(f.api("POST", "/api/v1/trash/purge", R"({"before":1700000000000})").status == 200);
+    CHECK(f.fakes.trash->lastPurge.before == 1700000000000);
+    REQUIRE(f.api("POST", "/api/v1/trash/purge", R"({"all":true})").status == 200);
+    CHECK(f.fakes.trash->lastPurge.all);
+    CHECK(f.api("POST", "/api/v1/trash/purge", R"({"all":false})").status == 400);
+    CHECK(f.api("POST", "/api/v1/trash/purge", R"({"ids":[]})").status == 400);
+    CHECK(f.api("POST", "/api/v1/trash/purge", R"({"before":"вчера"})").status == 400);
+
+    f.fakes.trash->error = domain::Error{Code::NotFound, "Объекта нет в корзине"};
+    CHECK(f.api("POST", "/api/v1/trash/purge", R"({"ids":[99]})").status == 404);
+    f.fakes.trash->error = domain::Error{Code::InvalidArgument, "Папка в корзине"};
+    CHECK(f.api("POST", "/api/v1/trash/restore", R"({"ids":[7]})").status == 422);
+}
+
 TEST_CASE("entries endpoints speak the documented DTO", "[http][entries]") {
     HttpFixture f;
     auto root = f.api("GET", "/api/v1/entries");

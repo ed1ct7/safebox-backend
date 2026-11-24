@@ -85,6 +85,9 @@ namespace {
     if (text == "size") {
         return app::SortKey::Size;
     }
+    if (text == "trashed") {
+        return app::SortKey::Trashed;
+    }
     return std::nullopt;
 }
 
@@ -222,6 +225,9 @@ Json toJson(const domain::Entry& entry) {
             j["previewPending"] = true; // нет в очереди - поля нет вовсе
         }
     }
+    if (entry.meta.trashedAt) {
+        j["trashedAt"] = *entry.meta.trashedAt; // только у корня корзины
+    }
     return j;
 }
 
@@ -244,6 +250,24 @@ Json toJson(const app::FolderListing& listing) {
         {"entries", std::move(entries)},
         {"total", listing.total},
     };
+}
+
+Json toJson(const app::TrashListing& listing) {
+    Json entries = Json::array();
+    for (const auto& item : listing.entries) {
+        auto j = toJson(item.entry);
+        j["location"] = toJson(item.location);
+        entries.push_back(std::move(j));
+    }
+    return Json{{"entries", std::move(entries)}, {"total", listing.total}};
+}
+
+Json toJson(const app::RestoreResult& result) {
+    Json renamed = Json::array();
+    for (const auto& item : result.renamed) {
+        renamed.push_back(Json{{"id", item.id}, {"name", item.name}});
+    }
+    return Json{{"restored", result.restored}, {"renamed", std::move(renamed)}};
 }
 
 Json toJson(const app::BackupProgress& progress) {
