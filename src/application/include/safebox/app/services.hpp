@@ -379,6 +379,21 @@ struct CreateLinksResult {
     std::vector<std::string> invalid; // не http(s)-адрес или недопустимый путь папок
 };
 
+// Досчет sha256 содержимого у записей, сохраненных до того, как импорт стал его считать (поиск
+// повторов). Идет сам в фоне после открытия сейфа, пачками; блокировку не задерживает.
+struct HashProgress {
+    std::size_t pending = 0; // записей с содержимым, еще ждущих хеша в этом открытии
+    std::size_t failed = 0;  // содержимое не прочиталось (повреждено) - пропущены
+};
+
+class ContentHashService {
+public:
+    virtual ~ContentHashService() = default;
+
+    [[nodiscard]] virtual HashProgress progress(const Lease& lease) const = 0;
+    virtual void drain() = 0; // дождаться, пока очередь опустеет (тесты)
+};
+
 class LinksService {
 public:
     virtual ~LinksService() = default;
@@ -423,6 +438,7 @@ struct Services {
     std::shared_ptr<TagsService> tags;
     std::shared_ptr<LinksService> links;
     std::shared_ptr<SettingsService> settings;
+    std::shared_ptr<ContentHashService> hashes; // последним: его поток останавливается первым
 };
 
 } // namespace safebox::app

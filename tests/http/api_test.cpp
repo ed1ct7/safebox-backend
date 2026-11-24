@@ -379,6 +379,8 @@ TEST_CASE("safe lifecycle endpoints", "[http][safe]") {
     auto authed = f.api("GET", "/api/v1/safe/status");
     CHECK(authed.json()["authorized"] == true);
     CHECK(authed.json()["safe"]["entryCount"] == 3);
+    CHECK(authed.json()["hashes"] == http::Json{{"pending", 12}, {"failed", 1}});
+    CHECK_FALSE(status.json().contains("hashes")); // без токена - нет
 
     auto lock = f.api("POST", "/api/v1/safe/lock");
     CHECK(lock.status == 204);

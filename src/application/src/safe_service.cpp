@@ -51,7 +51,8 @@ using domain::SafeMeta;
 
 class SafeServiceImpl final : public SafeService {
 public:
-    SafeServiceImpl(Ports ports, AppConfig config) : ports_(ports), config_(std::move(config)) {}
+    SafeServiceImpl(Ports ports, AppConfig config, SessionStarted onStarted)
+        : ports_(ports), config_(std::move(config)), onStarted_(std::move(onStarted)) {}
     ~SafeServiceImpl() override { lock(); }
 
     Result<UnlockResult> create(const CreateSafeCmd& cmd) override {
@@ -386,6 +387,9 @@ private:
             current_ = session;
             lastPath_ = domain::pathToUtf8(session->path());
         }
+        if (onStarted_) {
+            onStarted_(session);
+        }
         return UnlockResult{std::move(tokens), std::move(*info)};
     }
 
@@ -443,6 +447,7 @@ private:
 
     Ports ports_;
     AppConfig config_;
+    SessionStarted onStarted_;
     std::mutex lifecycleMutex_;
     std::mutex passwordMutex_;
     mutable std::mutex stateMutex_;
@@ -453,8 +458,9 @@ private:
 
 } // namespace
 
-std::shared_ptr<SafeService> makeSafeService(Ports ports, AppConfig config) {
-    return std::make_shared<SafeServiceImpl>(ports, std::move(config));
+std::shared_ptr<SafeService> makeSafeService(Ports ports, AppConfig config,
+                                             SessionStarted onStarted) {
+    return std::make_shared<SafeServiceImpl>(ports, std::move(config), std::move(onStarted));
 }
 
 } // namespace safebox::app

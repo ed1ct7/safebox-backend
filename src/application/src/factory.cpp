@@ -6,13 +6,21 @@ namespace safebox::app {
 
 Services makeServices(Ports ports, AppConfig config) {
     Services services;
-    services.safe = makeSafeService(ports, std::move(config));
+    auto hashes = makeContentHashService(ports);
+    services.safe = makeSafeService(
+        ports, std::move(config),
+        [weak = std::weak_ptr<ContentHashRunner>(hashes)](std::weak_ptr<VaultSession> session) {
+            if (auto runner = weak.lock()) {
+                runner->start(std::move(session));
+            }
+        });
     services.entries = makeEntriesService(ports);
     services.importExport = makeImportExportService(ports);
     services.search = makeSearchService(ports);
     services.tags = makeTagsService(ports);
     services.settings = makeSettingsService(ports);
     services.links = makeLinksService(ports, services.settings);
+    services.hashes = std::move(hashes);
     return services;
 }
 

@@ -32,6 +32,11 @@ void registerSafeApi(httplib::Server& server, ApiContext& ctx) {
                 if (auto info = ctx.services.safe->info(*lease)) {
                     body["authorized"] = true;
                     body["safe"] = toJson(*info);
+                    if (ctx.services.hashes) { // досчет sha256 старых записей идет в фоне
+                        const auto hashes = ctx.services.hashes->progress(*lease);
+                        body["hashes"] =
+                            Json{{"pending", hashes.pending}, {"failed", hashes.failed}};
+                    }
                 }
             }
         }

@@ -682,6 +682,50 @@ TEST_CASE("a repeated content is not written again", "[import][dedup]") {
     CHECK(f.store.pendingBlobs(f.safePath()) == 0);
 }
 
+TEST_CASE("older entries get their content hash after unlock", "[import][dedup][backfill]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    const auto small = randomBytes(300, 5);
+    const auto big = randomBytes(5000, 6); // несколько кусков
+    const auto broken = randomBytes(2500, 7);
+    REQUIRE(
+        f.importFiles(s, {{"old/a.bin", small}, {"old/big.bin", big}, {"old/broken.bin", broken}})
+            .imported == 3);
+    const auto folder = f.entryNamed(s, "old");
+    const auto a = f.entryNamed(s, "a.bin", folder.id);
+    const auto bigEntry = f.entryNamed(s, "big.bin", folder.id);
+    const auto brokenEntry = f.entryNamed(s, "broken.bin", folder.id);
+    f.services.hashes->drain(); // правки мимо сервисов - когда фон молчит
+    {
+        RawVault raw(f); // как записи, сохраненные до хешей
+        for (const auto id : {a.id, bigEntry.id, brokenEntry.id}) {
+            raw.editMeta(id, [](domain::EntryMeta& meta) { meta.sha256.reset(); });
+        }
+        auto db = f.store.database(f.safePath());
+        auto& chunk = db->blobs.at(blobOf(brokenEntry)).chunks[1];
+        auto copy = *chunk;
+        copy[10] ^= std::byte{0x01};
+        chunk = std::make_shared<const domain::Bytes>(copy);
+    }
+    s = reopen(f);
+    f.services.hashes->drain();
+
+    const auto hashedA = f.entryNamed(s, "a.bin", folder.id);
+    CHECK(hashedA.meta.sha256 == sha256Of(f, small));
+    CHECK(f.entryNamed(s, "big.bin", folder.id).meta.sha256 == sha256Of(f, big));
+    CHECK_FALSE(f.entryNamed(s, "broken.bin", folder.id).meta.sha256);
+    CHECK(hashedA.meta.modifiedAt == a.meta.modifiedAt); // не правка пользователя
+    CHECK(hashedA.meta.size == a.meta.size);
+    const auto progress = f.services.hashes->progress(f.lease(s));
+    CHECK(progress.pending == 0);
+    CHECK(progress.failed == 1);
+
+    // теперь повтор старого файла ловится
+    const auto r = f.importFiles(s, {{"again.bin", small}});
+    REQUIRE(r.duplicates.size() == 1);
+    CHECK(r.duplicates[0].existing == a.id);
+}
+
 TEST_CASE("many small files are written in batches", "[import][batch]") {
     AppFixture f;
     auto s = f.createSafe();

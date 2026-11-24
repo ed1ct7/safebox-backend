@@ -198,6 +198,14 @@ public:
     void setPreviewPending(domain::EntryId id, bool pending);
     [[nodiscard]] bool previewPending(domain::EntryId id) const;
 
+    // Досчет sha256 старых записей (ContentHashService): сколько осталось и не прочиталось.
+    void setHashProgress(std::size_t pending, std::size_t failed) noexcept {
+        hashesPending_.store(pending);
+        hashesFailed_.store(failed);
+    }
+    [[nodiscard]] std::size_t hashesPending() const noexcept { return hashesPending_.load(); }
+    [[nodiscard]] std::size_t hashesFailed() const noexcept { return hashesFailed_.load(); }
+
 private:
     struct Token {
         std::string value;
@@ -218,6 +226,8 @@ private:
     std::unordered_set<domain::EntryId> pendingEntries_; // изменения после построения catalog_
     bool pendingTags_ = false;
     std::unordered_set<domain::EntryId> previewPending_;
+    std::atomic<std::size_t> hashesPending_{0};
+    std::atomic<std::size_t> hashesFailed_{0};
 
     std::mutex catalogBuildMutex_; // один построитель кэша за раз
 

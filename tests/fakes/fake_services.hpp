@@ -470,6 +470,14 @@ public:
     int updates = 0;
 };
 
+class FakeContentHashService final : public app::ContentHashService {
+public:
+    app::HashProgress progress(const app::Lease&) const override { return value; }
+    void drain() override {}
+
+    app::HashProgress value{.pending = 12, .failed = 1};
+};
+
 struct FakeServices {
     std::shared_ptr<FakeSafeService> safe = std::make_shared<FakeSafeService>();
     std::shared_ptr<FakeEntriesService> entries = std::make_shared<FakeEntriesService>();
@@ -479,9 +487,10 @@ struct FakeServices {
     std::shared_ptr<FakeTagsService> tags = std::make_shared<FakeTagsService>();
     std::shared_ptr<FakeLinksService> links = std::make_shared<FakeLinksService>();
     std::shared_ptr<FakeSettingsService> settings = std::make_shared<FakeSettingsService>();
+    std::shared_ptr<FakeContentHashService> hashes = std::make_shared<FakeContentHashService>();
 
     [[nodiscard]] app::Services services() const {
-        return {safe, entries, importExport, search, tags, links, settings};
+        return {safe, entries, importExport, search, tags, links, settings, hashes};
     }
 };
 
