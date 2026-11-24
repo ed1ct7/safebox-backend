@@ -25,6 +25,7 @@ using Json = nlohmann::json;
 inline constexpr std::string_view kImportPath = "/api/v1/import";
 inline constexpr std::string_view kImportPlanPath = "/api/v1/import/plan";
 inline constexpr std::string_view kLinksPath = "/api/v1/links";
+inline constexpr std::string_view kLookupPath = "/api/v1/entries/lookup";
 // PUT /api/v1/media/:id/thumbnail - тело картинка, не JSON
 [[nodiscard]] bool isThumbnailUpload(const httplib::Request& req);
 // Лимит JSON плана и manifest импорта и пачки ссылок: на 100 000 файлов (10 000 ссылок) с длинными
@@ -100,6 +101,12 @@ void replaceHeader(httplib::Response& res, const std::string& key, const std::st
                                   httplib::Response& res);
 [[nodiscard]] bool readListOptions(const httplib::Request& req, app::ListOptions& options,
                                    httplib::Response& res);
+// Поля записи при создании: "description", "source", "sourceUrl" (строки), "sourceDate"
+// (целое), "tags" (список id); null или нет поля - не задано. false - неверный тип.
+[[nodiscard]] bool parseEntryDetails(const Json& item, app::EntryDetails& details);
+// 64 hex-символа (любой регистр) -> хеш
+[[nodiscard]] std::optional<domain::Sha256> parseSha256(std::string_view hex) noexcept;
+[[nodiscard]] std::string sha256Hex(const domain::Sha256& hash);
 // "keepBoth" | "replace" | "skip"
 [[nodiscard]] std::optional<app::ConflictPolicy>
 parseConflictPolicy(std::string_view text) noexcept;

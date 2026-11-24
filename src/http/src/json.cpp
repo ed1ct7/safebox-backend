@@ -32,6 +32,71 @@ std::optional<std::string> requireString(const Json& body, const char* field,
     return it->get<std::string>();
 }
 
+bool parseEntryDetails(const Json& item, app::EntryDetails& details) {
+    const auto text = [&item](const char* field, std::optional<std::string>& value) {
+        const auto it = item.find(field);
+        if (it == item.end() || it->is_null()) {
+            return true;
+        }
+        if (!it->is_string()) {
+            return false;
+        }
+        value = it->get<std::string>();
+        return true;
+    };
+    if (!text("description", details.description) || !text("source", details.source) ||
+        !text("sourceUrl", details.sourceUrl)) {
+        return false;
+    }
+    if (const auto it = item.find("sourceDate"); it != item.end() && !it->is_null()) {
+        if (!it->is_number_integer()) {
+            return false;
+        }
+        details.sourceDate = it->get<std::int64_t>();
+    }
+    if (const auto it = item.find("tags"); it != item.end() && !it->is_null()) {
+        if (!it->is_array()) {
+            return false;
+        }
+        for (const auto& tag : *it) {
+            if (!tag.is_number_integer() || tag.get<std::int64_t>() <= 0) {
+                return false;
+            }
+            details.tags.push_back(tag.get<domain::TagId>());
+        }
+    }
+    return true;
+}
+
+std::optional<domain::Sha256> parseSha256(std::string_view hex) noexcept {
+    domain::Sha256 hash{};
+    if (hex.size() != hash.size() * 2) {
+        return std::nullopt;
+    }
+    for (std::size_t i = 0; i < hash.size(); ++i) {
+        const char* first = hex.data() + i * 2;
+        unsigned value = 0;
+        const auto [ptr, ec] = std::from_chars(first, first + 2, value, 16);
+        if (ec != std::errc{} || ptr != first + 2) {
+            return std::nullopt;
+        }
+        hash[i] = static_cast<std::byte>(value);
+    }
+    return hash;
+}
+
+std::string sha256Hex(const domain::Sha256& hash) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string hex;
+    hex.reserve(hash.size() * 2);
+    for (const auto b : hash) {
+        const auto u = static_cast<unsigned>(b);
+        hex.push_back(kHex[u >> 4]);
+        hex.push_back(kHex[u & 0x0F]);
+    }
+    return hex;
+}
+
 bool readOptionalString(const Json& body, const char* field, std::optional<std::string>& value,
                         httplib::Response& res) {
     const auto it = body.find(field);
@@ -267,15 +332,7 @@ Json toJson(const domain::Entry& entry) {
         j["sourceDate"] = *entry.meta.sourceDate;
     }
     if (entry.meta.sha256) {
-        static constexpr char kHex[] = "0123456789abcdef";
-        std::string hex;
-        hex.reserve(64);
-        for (const auto b : *entry.meta.sha256) {
-            const auto u = static_cast<unsigned>(b);
-            hex.push_back(kHex[u >> 4]);
-            hex.push_back(kHex[u & 0x0F]);
-        }
-        j["sha256"] = std::move(hex);
+        j["sha256"] = sha256Hex(*entry.meta.sha256);
     }
     if (entry.meta.dimensions) { // известны - от клиента (PUT миниатюры)
         j["width"] = entry.meta.dimensions->width;
@@ -452,6 +509,10 @@ Json toJson(const domain::ImportResult& result) {
     for (const auto& d : result.duplicates) {
         duplicates.push_back(Json{{"path", d.path}, {"existingId", d.existing}});
     }
+    Json written = Json::array();
+    for (const auto& w : result.written) {
+        written.push_back(Json{{"path", w.path}, {"id", w.id}});
+    }
     return Json{
         {"imported", result.imported},
         {"replaced", result.replaced},
@@ -460,6 +521,7 @@ Json toJson(const domain::ImportResult& result) {
         {"failures", std::move(failures)},
         {"duplicates", result.duplicates.size()},
         {"duplicateFiles", std::move(duplicates)},
+        {"importedFiles", std::move(written)},
     };
 }
 

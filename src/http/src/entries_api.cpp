@@ -265,6 +265,50 @@ void registerEntriesApi(httplib::Server& server, ApiContext& ctx) {
         sendJson(res, Json{{"removed", *removed}});
     });
 
+    // {"sha256": [hex]} -> {"found": [{"sha256", "id"}]}: что из архива уже есть в сейфе.
+    server.Post(
+        std::string(kLookupPath), [&ctx](const httplib::Request& req, httplib::Response& res) {
+            auto lease = requireApi(ctx, req, res);
+            if (!lease) {
+                return;
+            }
+            auto body = readJsonObject(req, res);
+            if (!body) {
+                return;
+            }
+            const auto it = body->find("sha256");
+            if (it == body->end() || !it->is_array()) {
+                sendError(res, 400, "bad_request", "Поле 'sha256' должно быть списком hex-строк");
+                return;
+            }
+            if (it->size() > app::kMaxLookupHashes) { // до разбора: тело до 32 МиБ
+                sendError(res, domain::Error{domain::Error::Code::InvalidArgument,
+                                             "Не больше 10 000 хешей за раз"});
+                return;
+            }
+            std::vector<domain::Sha256> hashes;
+            hashes.reserve(it->size());
+            for (const auto& item : *it) {
+                const auto hash =
+                    item.is_string() ? parseSha256(item.get<std::string>()) : std::nullopt;
+                if (!hash) {
+                    sendError(res, 400, "bad_request", "Каждый sha256 - 64 hex-символа");
+                    return;
+                }
+                hashes.push_back(*hash);
+            }
+            auto found = ctx.services.entries->lookup(*lease, hashes);
+            if (!found) {
+                sendError(res, found.error());
+                return;
+            }
+            Json items = Json::array();
+            for (const auto& match : *found) {
+                items.push_back(Json{{"sha256", sha256Hex(match.sha256)}, {"id", match.id}});
+            }
+            sendJson(res, Json{{"found", std::move(items)}});
+        });
+
     server.Post("/api/v1/entries/move/plan",
                 [&ctx](const httplib::Request& req, httplib::Response& res) {
                     auto lease = requireApi(ctx, req, res);

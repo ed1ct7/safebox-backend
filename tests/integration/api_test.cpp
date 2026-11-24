@@ -801,13 +801,18 @@ TEST_CASE("re-importing a folder over HTTP: plan, then a manifest with the decis
     // "Пропустить": на сервер идет только новый файл
     auto onlyNew = upload("", {{"file", "CCC", "pict/c.txt", "text/plain"}});
     REQUIRE(onlyNew->status == 200);
-    CHECK(Json::parse(onlyNew->body) == Json({{"imported", 1},
-                                              {"replaced", 0},
-                                              {"skipped", 0},
-                                              {"failed", 0},
-                                              {"failures", Json::array()},
-                                              {"duplicates", 0},
-                                              {"duplicateFiles", Json::array()}}));
+    auto onlyNewBody = Json::parse(onlyNew->body);
+    REQUIRE(onlyNewBody["importedFiles"].size() == 1);
+    CHECK(onlyNewBody["importedFiles"][0]["path"] == "pict/c.txt");
+    CHECK(onlyNewBody["importedFiles"][0]["id"] == byName(listing(pictId), "c.txt")["id"]);
+    onlyNewBody.erase("importedFiles");
+    CHECK(onlyNewBody == Json({{"imported", 1},
+                               {"replaced", 0},
+                               {"skipped", 0},
+                               {"failed", 0},
+                               {"failures", Json::array()},
+                               {"duplicates", 0},
+                               {"duplicateFiles", Json::array()}}));
     CHECK(listing(pictId)["entries"].size() == 3);
     CHECK(contentOf(byName(listing(pictId), "a.txt")) == "AAA");
 

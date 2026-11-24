@@ -1101,6 +1101,97 @@ TEST_CASE("import applies the manifest to the files it names", "[http][import][m
     }
 }
 
+TEST_CASE("the manifest carries details and the client's sha256", "[http][import][archive]") {
+    HttpFixture f;
+    const std::string manifest =
+        R"({"files":{"a.txt":{"sha256":"abababababababababababababababababababababababababababababababab","description":"d","tags":[3,4],)"
+        R"("source":"telegram","sourceUrl":"https://t.me/x","sourceDate":1700000000000},)"
+        R"("b.txt":{"tags":null,"description":null,"sha256":null}}})";
+    auto ok =
+        postImport(f, manifestPart(manifest) + filePart("a.txt", "A") + filePart("b.txt", "B"));
+    REQUIRE(ok.status == 200);
+    CHECK(ok.json()["importedFiles"].is_array());
+    const auto& a = f.fakes.importExport->importOptions.at("a.txt");
+    REQUIRE(a.sha256.has_value());
+    CHECK((*a.sha256)[0] == std::byte{0xAB});
+    CHECK((*a.sha256)[31] == std::byte{0xAB});
+    CHECK(a.details.description == "d");
+    CHECK(a.details.tags == std::vector<domain::TagId>{3, 4});
+    CHECK(a.details.source == "telegram");
+    CHECK(a.details.sourceUrl == "https://t.me/x");
+    CHECK(a.details.sourceDate == 1'700'000'000'000);
+    const auto& b = f.fakes.importExport->importOptions.at("b.txt");
+    CHECK_FALSE(b.sha256.has_value());
+    CHECK_FALSE(b.details.description.has_value());
+    CHECK(b.details.tags.empty());
+
+    f.fakes.importExport->imported.clear();
+    for (
+        const char* bad :
+        {R"({"files":{"a.txt":{"sha256":"abc"}}})",
+         R"({"files":{"a.txt":{"sha256":"gaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}})",
+         R"({"files":{"a.txt":{"sha256":7}}})", R"({"files":{"a.txt":{"tags":"3"}}})",
+         R"({"files":{"a.txt":{"tags":[0]}}})", R"({"files":{"a.txt":{"tags":["3"]}}})",
+         R"({"files":{"a.txt":{"description":5}}})", R"({"files":{"a.txt":{"sourceDate":"2024"}}})",
+         R"({"files":{"a.txt":{"sourceDate":1.5}}})"}) {
+        INFO(bad);
+        auto reply = postImport(f, manifestPart(bad) + filePart("a.txt", "A"));
+        CHECK(reply.status == 400);
+    }
+    CHECK(f.fakes.importExport->imported.empty());
+}
+
+TEST_CASE("POST /entries/lookup answers which hashes are already there",
+          "[http][entries][archive]") {
+    HttpFixture f;
+    domain::Sha256 known{};
+    known.fill(std::byte{0xAB});
+    f.fakes.entries->known[known] = 42;
+    auto r = f.api(
+        "POST", "/api/v1/entries/lookup",
+        R"({"sha256":["abababababababababababababababababababababababababababababababab","ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABCD","ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"]})");
+    REQUIRE(r.status == 200);
+    CHECK(
+        r.json() ==
+        http::Json::parse(
+            R"({"found":[{"sha256":"abababababababababababababababababababababababababababababababab","id":42},)"
+            R"({"sha256":"abababababababababababababababababababababababababababababababab","id":42}]})"));
+    CHECK(f.fakes.entries->lastLookup.size() == 3);
+    for (const char* bad :
+         {R"({})",
+          R"({"sha256":"abababababababababababababababababababababababababababababababab"})",
+          R"({"sha256":[1]})", R"({"sha256":["xyz"]})",
+          R"({"sha256":["gaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]})"}) {
+        INFO(bad);
+        CHECK(f.api("POST", "/api/v1/entries/lookup", bad).status == 400);
+    }
+    CHECK(f.api("POST", "/api/v1/entries/lookup", R"({"sha256":[]})").status == 200);
+    // больше 10 000 - 422 до разбора хешей (даже битых), сервис не вызывается
+    f.fakes.entries->lastLookup.clear();
+    std::string tooMany = R"({"sha256":[)";
+    for (std::size_t i = 0; i <= app::kMaxLookupHashes; ++i) {
+        tooMany += i == 0 ? R"("x")" : R"(,"x")";
+    }
+    tooMany += "]}";
+    CHECK(f.api("POST", "/api/v1/entries/lookup", tooMany).status == 422);
+}
+
+TEST_CASE("POST /links passes the details of each link", "[http][links][archive]") {
+    HttpFixture f;
+    auto r = f.api("POST", "/api/v1/links",
+                   R"({"links":[{"url":"https://a.example/","description":"d","tags":[5],)"
+                   R"("source":"youtube","sourceUrl":"https://y.example/","sourceDate":7}]})");
+    REQUIRE(r.status == 201);
+    REQUIRE(f.fakes.links->lastCreate.has_value());
+    const auto& details = f.fakes.links->lastCreate->links.at(0).details;
+    CHECK(details.description == "d");
+    CHECK(details.tags == std::vector<domain::TagId>{5});
+    CHECK(details.source == "youtube");
+    CHECK(details.sourceDate == 7);
+    CHECK(f.api("POST", "/api/v1/links", R"({"links":[{"url":"https://a.example/","tags":5}]})")
+              .status == 400);
+}
+
 TEST_CASE("a bad manifest is refused before any file is imported", "[http][import][manifest]") {
     HttpFixture f;
     const auto refused = [&](const std::string& parts) {

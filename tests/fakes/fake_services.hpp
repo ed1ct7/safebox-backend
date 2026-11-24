@@ -208,11 +208,25 @@ public:
         return ids.size();
     }
 
+    app::Result<std::vector<app::HashMatch>>
+    lookup(const app::Lease&, std::span<const domain::Sha256> hashes) override {
+        lastLookup.assign(hashes.begin(), hashes.end());
+        std::vector<app::HashMatch> found;
+        for (const auto& hash : hashes) {
+            if (const auto it = known.find(hash); it != known.end()) {
+                found.push_back({hash, it->second});
+            }
+        }
+        return found;
+    }
+
     std::map<domain::EntryId, domain::Entry> entries;
     std::optional<domain::Error> getError;
     std::optional<domain::Error> updateError;
     std::optional<domain::Error> moveError;
     std::vector<domain::EntryId> removed;
+    std::vector<domain::Sha256> lastLookup;
+    std::map<domain::Sha256, domain::EntryId> known; // для lookup
     std::optional<app::UpdateEntryCmd> lastUpdate;
     std::vector<domain::EntryId> lastPlanIds;
     std::optional<domain::EntryId> lastPlanParent;
@@ -267,6 +281,8 @@ private:
 
 class FakeImportExportService final : public app::ImportExportService {
 public:
+    std::size_t activeImports() const override { return 0; }
+
     app::Result<std::unique_ptr<app::ImportSession>>
     beginImport(app::Lease, std::optional<domain::EntryId> parent) override {
         importParent = parent;

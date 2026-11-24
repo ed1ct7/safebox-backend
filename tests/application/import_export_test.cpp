@@ -13,8 +13,8 @@ namespace {
 
 constexpr std::string_view kShortcut = "[InternetShortcut]\r\nURL=https://example.com/a?b=1\r\n";
 
-constexpr app::ImportFileOptions kSkip{.onConflict = ConflictPolicy::Skip};
-constexpr app::ImportFileOptions kReplace{.onConflict = ConflictPolicy::Replace};
+const app::ImportFileOptions kSkip{.onConflict = ConflictPolicy::Skip};
+const app::ImportFileOptions kReplace{.onConflict = ConflictPolicy::Replace};
 
 using Names = std::vector<std::string>;
 

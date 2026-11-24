@@ -155,6 +155,14 @@ struct MoveResult {
     std::size_t skipped = 0;
 };
 
+// Содержимое с этим хешем уже есть в сейфе (вне корзины): запись с наименьшим id.
+struct HashMatch {
+    domain::Sha256 sha256{};
+    domain::EntryId id = 0;
+};
+
+inline constexpr std::size_t kMaxLookupHashes = 10'000;
+
 class EntriesService {
 public:
     virtual ~EntriesService() = default;
@@ -185,6 +193,11 @@ public:
     // ними. Уже лежащие в корзине пропускаются. -> сколько записей ушло всего (с потомками).
     [[nodiscard]] virtual Result<std::size_t> remove(const Lease& lease,
                                                      std::span<const domain::EntryId> ids) = 0;
+    // Какие хеши содержимого уже есть: загрузчик архива не передает их. Не больше
+    // kMaxLookupHashes; у записей, чей хеш еще досчитывается (HashProgress), совпадения нет.
+    // Пустое содержимое не ищется: импорт пустые файлы повтором не считает.
+    [[nodiscard]] virtual Result<std::vector<HashMatch>>
+    lookup(const Lease& lease, std::span<const domain::Sha256> hashes) = 0;
 };
 
 // TrashService - корзина: корни удаленных поддеревьев (meta.trashedAt), parent_id у них прежний.
@@ -244,12 +257,25 @@ enum class DuplicatePolicy {
     Import, // записать еще раз
 };
 
+// Что клиент знает о записи при создании (manifest импорта, пачка ссылок): запись создается
+// сразу целиком, без второго запроса. Незаданное не трогается; у замены теги добавляются.
+struct EntryDetails {
+    std::optional<std::string> description;
+    std::vector<domain::TagId> tags; // прямые присвоения, без наследования
+    std::optional<std::string> source;
+    std::optional<std::string> sourceUrl;
+    std::optional<std::int64_t> sourceDate;
+};
+
 // Что известно о файле кроме пути: дата исходного файла и как поступить, если имя занято или
 // такое содержимое уже есть.
 struct ImportFileOptions {
     std::optional<std::int64_t> sourceModifiedAt; // unix-мс изменения файла на диске
     ConflictPolicy onConflict = ConflictPolicy::KeepBoth;
     DuplicatePolicy onDuplicate = DuplicatePolicy::Skip;
+    EntryDetails details;
+    // Хеш, посчитанный клиентом: не совпал с принятым содержимым - файл не записывается.
+    std::optional<domain::Sha256> sha256;
 };
 
 // Потоковый импорт одного запроса: http проталкивает части multipart по
@@ -333,6 +359,9 @@ public:
     [[nodiscard]] virtual Result<domain::Entry> setThumbnail(const Lease& lease, domain::EntryId id,
                                                              std::span<const std::byte> image,
                                                              const MediaInfo& info) = 0;
+    // Сколько импортов еще идет, включая дописывание пачки после оборванного запроса: пока не
+    // 0, lookup может не видеть часть принятого (загрузчик архива ждет 0).
+    [[nodiscard]] virtual std::size_t activeImports() const = 0;
 };
 
 // TagsService
@@ -465,6 +494,7 @@ struct NewLink {
     std::string url;                 // как ввел пользователь; пробелы по краям срезаются
     std::optional<std::string> name; // не задано - хост адреса
     std::string path;                // "Закладки/Работа": папки внутри parent, пусто - сам parent
+    EntryDetails details;            // у уже существующей ссылки не применяется
 };
 
 struct CreateLinksCmd {

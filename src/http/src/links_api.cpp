@@ -21,7 +21,8 @@ namespace {
     return true;
 }
 
-// "links": [{"url": строка, "name"?: строка, "path"?: строка}]; иначе 400 уже отправлен.
+// "links": [{"url": строка, "name"?: строка, "path"?: строка, поля записи (parseEntryDetails)}];
+// иначе 400 уже отправлен.
 [[nodiscard]] bool readLinks(const Json& body, std::vector<app::NewLink>& links,
                              httplib::Response& res) {
     const auto it = body.find("links");
@@ -44,6 +45,12 @@ namespace {
             return false;
         }
         link.path = path.value_or(std::string{});
+        if (!parseEntryDetails(item, link.details)) {
+            sendError(res, 400, "bad_request",
+                      "У ссылки description, source, sourceUrl - строки, sourceDate - целое, "
+                      "tags - список id");
+            return false;
+        }
         links.push_back(std::move(link));
     }
     return true;

@@ -135,6 +135,12 @@ struct ImportDuplicate {
     EntryId existing = 0; // запись с тем же содержимым
 };
 
+// Записанный файл: новая запись или поверх существующей.
+struct ImportedFile {
+    std::string path; // очищенный относительный путь файла (как в failures)
+    EntryId id = 0;
+};
+
 struct ImportResult {
     std::size_t imported = 0;
     std::size_t replaced = 0; // файлы, записанные поверх существующей записи с тем же именем
@@ -142,6 +148,7 @@ struct ImportResult {
     std::size_t failed = 0;
     std::vector<ImportFailure> failures;
     std::vector<ImportDuplicate> duplicates; // повторы содержимого: в сейф не записаны
+    std::vector<ImportedFile> written;       // imported + replaced, в порядке записи
 };
 
 } // namespace safebox::domain

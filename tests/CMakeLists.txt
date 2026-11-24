@@ -40,6 +40,7 @@ sbx_add_test_executable(safebox-app-tests
     application/links_test.cpp
     application/backup_test.cpp
     application/trash_test.cpp
+    application/archive_import_test.cpp
 )
 target_include_directories(safebox-app-tests PRIVATE
     "${PROJECT_SOURCE_DIR}/src/application/src" # white-box: IdlePolicy

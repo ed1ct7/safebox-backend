@@ -23,6 +23,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "entry_details.hpp"
 #include "path_folders.hpp"
 #include "safebox/domain/model/link_preview.hpp"
 #include "safebox/domain/model/rules.hpp"
@@ -208,6 +209,17 @@ public:
         if (auto st = requireLive(**catalog, cmd.parent); !st) {
             return std::unexpected(st.error());
         }
+        std::vector<EntryDetails> details;
+        details.reserve(cmd.links.size());
+        bool tagged = false;
+        for (const auto& link : cmd.links) {
+            auto checked = link.details;
+            if (auto st = checkDetails(checked, **catalog); !st) {
+                return fail(st.error().code, "Ссылка " + link.url + ": " + st.error().message);
+            }
+            tagged = tagged || !checked.tags.empty();
+            details.push_back(std::move(checked));
+        }
 
         CreateLinksResult result;
         struct Created {
@@ -222,6 +234,10 @@ public:
                 return std::unexpected(uow.error());
             }
             auto& tx = **uow;
+            auto live = tagged ? liveTags(tx) : Result<TagIds>{};
+            if (!live) {
+                return std::unexpected(live.error());
+            }
             PathFolders paths(ports_, ctx->session, ctx->sealer, cmd.parent, *catalog);
             // родитель -> нормализованный адрес -> ссылка; строится по снимку, когда родитель
             // встретился впервые
@@ -246,7 +262,8 @@ public:
             std::map<std::pair<std::optional<EntryId>, std::string>, int> suffixes;
             const auto now = domain::toUnixMillis(ports_.clock.now());
 
-            for (const auto& link : cmd.links) {
+            for (std::size_t i = 0; i < cmd.links.size(); ++i) {
+                const auto& link = cmd.links[i];
                 auto url = std::string(domain::detail::trim(link.url));
                 const auto normal = domain::normalizeUrl(url);
                 const auto dirs = splitDirectories(link.path);
@@ -273,7 +290,8 @@ public:
                 name = uniqueName(name, true, siblings.taken(),
                                   &suffixes[{*parent, foldForSearch(name)}]);
 
-                auto id = insertLink(tx, *ctx->sealer, *parent, name, url, named, now);
+                auto id =
+                    insertLink(tx, *ctx->sealer, *parent, name, url, named, now, details[i], *live);
                 if (!id) {
                     return std::unexpected(id.error());
                 }
@@ -363,7 +381,9 @@ public:
 private:
     Result<EntryId> insertLink(domain::UnitOfWork& uow, const Sealer& sealer,
                                std::optional<EntryId> parent, const std::string& name,
-                               const std::string& url, bool nameByUser, std::int64_t now) {
+                               const std::string& url, bool nameByUser, std::int64_t now,
+                               const EntryDetails& details,
+                               const std::unordered_set<domain::TagId>& live) {
         domain::EntryRecord record;
         record.parentId = parent;
         record.isFolder = false;
@@ -377,6 +397,7 @@ private:
         meta.url = url;
         meta.createdAt = meta.modifiedAt = now;
         meta.nameByUser = nameByUser;
+        applyDetails(meta, details, live);
         auto encName = sealer.sealName(*id, name);
         if (!encName) {
             return std::unexpected(encName.error());

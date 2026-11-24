@@ -31,7 +31,8 @@ using Manifest = std::unordered_map<std::string, app::ImportFileOptions>; // п�
 }
 
 // {"files": {"<путь>": {"lastModified"?: мс, "onConflict"?: "keepBoth"|"replace"|"skip",
-//                       "onDuplicate"?: "skip"|"import"}}};
+//                       "onDuplicate"?: "skip"|"import", "sha256"?: hex, "description"?,
+//                       "tags"?: [id], "source"?, "sourceUrl"?, "sourceDate"?: мс}}};
 // nullopt - тело не такое.
 [[nodiscard]] std::optional<Manifest> parseManifest(std::string_view text) {
     const Json root = Json::parse(text, nullptr, /*allow_exceptions=*/false);
@@ -79,7 +80,17 @@ using Manifest = std::unordered_map<std::string, app::ImportFileOptions>; // п�
                 return std::nullopt;
             }
         }
-        manifest.emplace(path, options);
+        if (const auto it = item.find("sha256"); it != item.end() && !it->is_null()) {
+            const auto hash = it->is_string() ? parseSha256(it->get<std::string>()) : std::nullopt;
+            if (!hash) {
+                return std::nullopt;
+            }
+            options.sha256 = *hash;
+        }
+        if (!parseEntryDetails(item, options.details)) {
+            return std::nullopt;
+        }
+        manifest.emplace(path, std::move(options));
     }
     return manifest;
 }

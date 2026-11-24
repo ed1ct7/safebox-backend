@@ -6,6 +6,7 @@ add_library(safebox-application STATIC
     src/safe_service.cpp
     src/idle_policy.cpp
     src/entries_service.cpp
+    src/entry_details.cpp
     src/import_export.cpp
     src/search_service.cpp
     src/tags_service.cpp

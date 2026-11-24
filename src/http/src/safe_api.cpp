@@ -37,6 +37,8 @@ void registerSafeApi(httplib::Server& server, ApiContext& ctx) {
                         body["hashes"] =
                             Json{{"pending", hashes.pending}, {"failed", hashes.failed}};
                     }
+                    // идущие импорты (и дописывание оборванных): загрузчик архива ждет 0
+                    body["imports"] = Json{{"active", ctx.services.importExport->activeImports()}};
                     if (ctx.services.backup) { // последняя копия этого открытия, если была
                         const auto backup = ctx.services.backup->progress(*lease);
                         if (backup.state != app::BackupState::None) {

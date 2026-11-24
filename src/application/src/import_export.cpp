@@ -22,6 +22,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "entry_details.hpp"
 #include "path_folders.hpp"
 #include "safebox/domain/model/rules.hpp"
 #include "safebox/domain/model/safe_format.hpp"
@@ -249,13 +250,30 @@ void appendWiping(Bytes& buffer, std::span<const std::byte> data, std::size_t li
     buffer.insert(buffer.end(), data.begin(), data.end());
 }
 
+// Счетчик идущих импортов: жив, пока жива сессия (и ее дописывание пачки в деструкторе).
+class ActiveImport {
+public:
+    explicit ActiveImport(std::shared_ptr<std::atomic<std::size_t>> count)
+        : count_(std::move(count)) {
+        count_->fetch_add(1);
+    }
+    ActiveImport(const ActiveImport&) = delete;
+    ActiveImport& operator=(const ActiveImport&) = delete;
+    ~ActiveImport() { count_->fetch_sub(1); }
+
+private:
+    std::shared_ptr<std::atomic<std::size_t>> count_;
+};
+
 class ImportSessionImpl final : public ImportSession {
 public:
     ImportSessionImpl(Lease lease, Ports ports, VaultSession& session,
                       std::shared_ptr<const Sealer> sealer, std::optional<EntryId> root,
-                      VaultSession::CatalogPtr snapshot)
-        : lease_(std::move(lease)), ports_(ports), session_(session), sealer_(sealer),
-          snapshot_(snapshot), paths_(ports, session, std::move(sealer), root, std::move(snapshot)),
+                      VaultSession::CatalogPtr snapshot,
+                      std::shared_ptr<std::atomic<std::size_t>> active)
+        : active_(std::move(active)), lease_(std::move(lease)), ports_(ports), session_(session),
+          sealer_(sealer), snapshot_(snapshot),
+          paths_(ports, session, std::move(sealer), root, std::move(snapshot)),
           chunkSize_(session.chunkSize()) {}
 
     ~ImportSessionImpl() override {
@@ -287,11 +305,17 @@ public:
         auto& file = *current_;
         file.content.sourceModifiedAt = options.sourceModifiedAt;
         file.onDuplicate = options.onDuplicate;
+        file.expectedSha = options.sha256;
+        file.content.details = options.details;
 
         auto split = splitPath(relativePath);
         file.path = std::move(split.clean);
         if (!split.valid) {
             failCurrent("Недопустимый путь файла");
+            return {};
+        }
+        if (auto st = checkDetails(file.content.details, *snapshot_); !st) {
+            failCurrent(st.error().message); // до папок пути: отвергнутый файл их не создает
             return {};
         }
         file.content.name = std::move(split.name);
@@ -350,10 +374,14 @@ public:
         bool queued = false;
         if (!file.failed && !file.skipped) {
             file.content.sha256 = file.hasher->finish();
-            fatal = checkDuplicate(file);
+            if (file.expectedSha && *file.expectedSha != *file.content.sha256) {
+                failCurrent("Содержимое не совпало с sha256 из manifest");
+            } else {
+                fatal = checkDuplicate(file);
+            }
             if (!fatal) {
                 failCurrent(fatal.error().message);
-            } else if (!file.duplicateOf) {
+            } else if (!file.failed && !file.duplicateOf) {
                 if (file.writer) { // большой файл: дописать последний кусок, запись сразу
                     fatal = flushChunk(true);
                     if (fatal && !file.failed) {
@@ -407,6 +435,7 @@ private:
         std::optional<domain::Sha256> sha256;
         BlobId blob = 0;
         std::optional<BlobId> thumb;
+        EntryDetails details; // из manifest, проверены
     };
 
     struct CurrentFile {
@@ -420,6 +449,7 @@ private:
         bool collectThumb = false;
         std::uint32_t chunks = 0;
         std::optional<EntryId> duplicateOf; // такое содержимое уже есть: не пишется
+        std::optional<domain::Sha256> expectedSha; // из manifest
         bool failed = false;
         bool committed = false;
         bool skipped = false;
@@ -551,6 +581,7 @@ private:
             ids.reserve(batch_.size());
             for (const auto& item : batch_) {
                 ids.push_back(item.id);
+                result_.written.push_back({item.path, item.id});
                 noteCommitted(item.content, item.id);
                 ++(item.content.replaces ? result_.replaced : result_.imported);
             }
@@ -602,6 +633,12 @@ private:
         if (auto st = ownStore(); !st) {
             return st;
         }
+        const bool tagged = std::ranges::any_of(
+            batch_, [](const Queued& item) { return !item.content.details.tags.empty(); });
+        auto live = tagged ? liveTags(**uow) : Result<TagIds>{};
+        if (!live) {
+            return std::unexpected(live.error());
+        }
         const auto now = domain::toUnixMillis(ports_.clock.now());
         for (auto& item : batch_) {
             auto blob = storeBlob(**uow, KeyPurpose::Content, item.data);
@@ -616,8 +653,8 @@ private:
                 }
                 item.content.thumb = *thumb;
             }
-            auto id = item.content.replaces ? replaceEntry(**uow, now, item.content)
-                                            : insertEntry(**uow, now, item.content);
+            auto id = item.content.replaces ? replaceEntry(**uow, now, item.content, *live)
+                                            : insertEntry(**uow, now, item.content, *live);
             if (!id) {
                 return std::unexpected(id.error());
             }
@@ -771,9 +808,13 @@ private:
         if (auto st = ownStore(); !st) {
             return failWith(st.error());
         }
+        auto live = file.content.details.tags.empty() ? Result<TagIds>{} : liveTags(**uow);
+        if (!live) {
+            return failWith(live.error());
+        }
         const auto now = domain::toUnixMillis(ports_.clock.now());
-        auto id = file.content.replaces ? replaceEntry(**uow, now, file.content)
-                                        : insertEntry(**uow, now, file.content);
+        auto id = file.content.replaces ? replaceEntry(**uow, now, file.content, *live)
+                                        : insertEntry(**uow, now, file.content, *live);
         if (!id) {
             return failWith(id.error());
         }
@@ -789,13 +830,15 @@ private:
             return failWith(st.error());
         }
         file.committed = true;
+        result_.written.push_back({file.path, *id});
         noteCommitted(file.content, *id);
         session_.catalogChanged({.entries = {*id}});
         return {};
     }
 
     // Поля записи, которые определяются самим файлом.
-    static void applyContent(domain::EntryMeta& meta, std::int64_t now, const Content& content) {
+    static void applyContent(domain::EntryMeta& meta, std::int64_t now, const Content& content,
+                             const std::unordered_set<domain::TagId>& live) {
         meta.kind = content.kind;
         meta.mime = content.mime;
         meta.size = content.size;
@@ -809,9 +852,11 @@ private:
         // Откуда запись (source, sourceUrl, sourceDate) - свойство записи, остается.
         meta.dimensions.reset();
         meta.durationMs.reset();
+        applyDetails(meta, content.details, live); // из manifest - поверх
     }
 
-    Result<EntryId> insertEntry(domain::UnitOfWork& uow, std::int64_t now, const Content& content) {
+    Result<EntryId> insertEntry(domain::UnitOfWork& uow, std::int64_t now, const Content& content,
+                                const std::unordered_set<domain::TagId>& live) {
         domain::EntryRecord record;
         record.parentId = content.parent;
         record.isFolder = false;
@@ -823,7 +868,7 @@ private:
         }
         domain::EntryMeta meta;
         meta.createdAt = now;
-        applyContent(meta, now, content);
+        applyContent(meta, now, content, live);
         auto encName = sealer_->sealName(*id, content.name);
         if (!encName) {
             return std::unexpected(encName.error());
@@ -839,8 +884,8 @@ private:
     }
 
     // Существующая запись получает новые блобы и содержимое меты; старые блобы уходят здесь же.
-    Result<EntryId> replaceEntry(domain::UnitOfWork& uow, std::int64_t now,
-                                 const Content& content) {
+    Result<EntryId> replaceEntry(domain::UnitOfWork& uow, std::int64_t now, const Content& content,
+                                 const std::unordered_set<domain::TagId>& live) {
         auto record = uow.entries().get(*content.replaces);
         if (!record) {
             return std::unexpected(record.error());
@@ -849,7 +894,7 @@ private:
         if (!entry) {
             return std::unexpected(entry.error());
         }
-        applyContent(entry->meta, now, content);
+        applyContent(entry->meta, now, content, live);
         auto encMeta = sealer_->sealMeta(record->id, entry->meta);
         domain::secureWipe(entry->name);
         domain::secureWipe(entry->meta.description);
@@ -912,7 +957,8 @@ private:
         queuedBytes_ = 0;
     }
 
-    Lease lease_; // объявлена первой -> освобождается последней (после discard)
+    ActiveImport active_; // первым: импорт считается идущим до конца деструктора
+    Lease lease_;         // освобождается после discard и дописывания пачки
     Ports ports_;
     VaultSession& session_;
     std::shared_ptr<const Sealer> sealer_;
@@ -952,8 +998,11 @@ public:
         VaultSession& session = ctx->session;
         auto sealer = ctx->sealer;
         return std::unique_ptr<ImportSession>(std::make_unique<ImportSessionImpl>(
-            std::move(lease), ports_, session, std::move(sealer), parent, std::move(*catalog)));
+            std::move(lease), ports_, session, std::move(sealer), parent, std::move(*catalog),
+            active_));
     }
+
+    std::size_t activeImports() const override { return active_->load(); }
 
     Result<ImportPlan> planImport(const Lease& lease, std::optional<EntryId> parent,
                                   std::span<const ImportPlanFile> files) override {
@@ -1284,6 +1333,8 @@ public:
 
 private:
     Ports ports_;
+    std::shared_ptr<std::atomic<std::size_t>> active_ =
+        std::make_shared<std::atomic<std::size_t>>(0);
 };
 
 } // namespace

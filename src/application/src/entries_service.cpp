@@ -403,6 +403,32 @@ public:
         return result;
     }
 
+    Result<std::vector<HashMatch>> lookup(const Lease& lease,
+                                          std::span<const domain::Sha256> hashes) override {
+        if (hashes.size() > kMaxLookupHashes) {
+            return fail(Error::Code::InvalidArgument, "Не больше 10 000 хешей за раз");
+        }
+        auto ctx = contextOf(lease);
+        if (!ctx) {
+            return std::unexpected(ctx.error());
+        }
+        auto catalog = catalogOf(*ctx, ports_.store);
+        if (!catalog) {
+            return std::unexpected(catalog.error());
+        }
+        const auto empty = ports_.crypto.sha256()->finish();
+        std::vector<HashMatch> found;
+        for (const auto& hash : hashes) {
+            if (hash == empty) {
+                continue;
+            }
+            if (const auto* node = (*catalog)->findBySha256(hash)) {
+                found.push_back({hash, node->entry.id});
+            }
+        }
+        return found;
+    }
+
     Result<std::size_t> remove(const Lease& lease, std::span<const EntryId> ids) override {
         if (ids.empty()) {
             return std::size_t{0};
