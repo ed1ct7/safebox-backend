@@ -6,6 +6,7 @@
 #include <sqlite3.h>
 
 #include <array>
+#include <chrono>
 #include <fstream>
 #include <optional>
 #include <system_error>
@@ -31,12 +32,23 @@ using domain::fail;
 using domain::Result;
 using domain::Status;
 
+std::unique_lock<std::mutex> lockConn(Connection& conn) {
+    struct Waiting {
+        std::atomic<int>& n;
+        explicit Waiting(std::atomic<int>& count) : n(count) { n.fetch_add(1); }
+        ~Waiting() { n.fetch_sub(1); }
+        Waiting(const Waiting&) = delete;
+        Waiting& operator=(const Waiting&) = delete;
+    } waiting(conn.waiting);
+    return std::unique_lock(conn.mutex);
+}
+
 Result<std::unique_lock<std::mutex>> lockOpen(Connection& conn) {
     if (conn.uowOwner.load() == std::this_thread::get_id()) {
         return fail(Error::Code::Internal,
                     "Операция хранилища вызвана внутри открытого UnitOfWork");
     }
-    std::unique_lock lock(conn.mutex);
+    auto lock = lockConn(conn);
     if (!conn.db) {
         return fail(Error::Code::Locked, "Сейф заблокирован");
     }
@@ -642,6 +654,24 @@ void removeStaleJournal(const std::filesystem::path& path) noexcept {
 
 // Копия: страниц за шаг. 256 * 64 КиБ = 16 МиБ - мьютекс соединения держится десятки мс.
 constexpr int kCopyPagesPerStep = 256;
+// Шаг уступает соединение ждущим его (lockConn): mutex не честный, и цикл копии, бравший его
+// сразу снова, держал запрос (GET /safe/status) до 25 с на копии 40 ГБ. Не дольше этого за шаг,
+// чтобы поток запросов не остановил копию совсем.
+constexpr auto kCopyYieldAtMost = std::chrono::milliseconds(250);
+
+// Ждущий обычно получает mutex за микросекунды - сначала yield; если он стоит за долгим
+// держателем (транзакция), дальше спим по 1 мс, а не крутим ядро.
+void yieldToWaiters(const Connection& conn) {
+    const auto until = std::chrono::steady_clock::now() + kCopyYieldAtMost;
+    for (int spins = 0; conn.waiting.load() > 0 && std::chrono::steady_clock::now() < until;
+         ++spins) {
+        if (spins < 64) {
+            std::this_thread::yield();
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+}
 
 [[nodiscard]] std::filesystem::path partOf(const std::filesystem::path& target) {
     auto part = target;
@@ -700,9 +730,14 @@ public:
         if (done_) {
             return true;
         }
-        auto lock = lockOpen(conn_);
-        if (!lock) {
-            return std::unexpected(lock.error());
+        if (conn_.uowOwner.load() == std::this_thread::get_id()) {
+            return fail(Error::Code::Internal, "Шаг копии вызван внутри открытого UnitOfWork");
+        }
+        yieldToWaiters(conn_);
+        // не lockConn: шаг сам себе не ждущий
+        std::unique_lock lock(conn_.mutex);
+        if (!conn_.db) {
+            return fail(Error::Code::Locked, "Сейф заблокирован");
         }
         if (conn_.copy != &state_ || state_.backup == nullptr) {
             return fail(Error::Code::Locked, "Копия прервана: сейф закрывался");
@@ -728,7 +763,7 @@ public:
         if (error) {
             return std::unexpected(std::move(*error));
         }
-        lock->unlock();
+        lock.unlock();
         return complete();
     }
 
@@ -774,7 +809,7 @@ private:
 } // namespace
 
 Status SqliteVaultStore::create(const std::filesystem::path& path, const domain::SafeMeta& meta) {
-    std::scoped_lock lock(conn_.mutex);
+    const auto lock = lockConn(conn_);
     if (conn_.db) {
         return fail(Error::Code::Internal, "Хранилище уже открыто");
     }
@@ -805,7 +840,7 @@ Status SqliteVaultStore::create(const std::filesystem::path& path, const domain:
 }
 
 Status SqliteVaultStore::open(const std::filesystem::path& path) {
-    std::scoped_lock lock(conn_.mutex);
+    const auto lock = lockConn(conn_);
     if (conn_.db) {
         return fail(Error::Code::Internal, "Хранилище уже открыто");
     }
@@ -861,7 +896,7 @@ Result<domain::SafeMeta> SqliteVaultStore::inspect(const std::filesystem::path& 
 }
 
 void SqliteVaultStore::close() noexcept {
-    std::scoped_lock lock(conn_.mutex);
+    const auto lock = lockConn(conn_);
     if (!conn_.db) {
         return;
     }

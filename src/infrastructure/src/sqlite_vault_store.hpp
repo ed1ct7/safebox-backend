@@ -31,8 +31,12 @@ struct Connection {
     bool schemaCurrent = false;
     std::atomic<std::thread::id> uowOwner{};
     CopyState* copy = nullptr; // под mutex: идущая копия или nullptr
+    // Ждущие mutex через lockConn; шаг копии уступает им (mutex не честный: см. step копии)
+    std::atomic<int> waiting{0};
 };
 
+// mutex соединения для всех, кроме шагов копии: ждущий виден копии и пропускается вперед
+[[nodiscard]] std::unique_lock<std::mutex> lockConn(Connection& conn);
 [[nodiscard]] domain::Result<std::unique_lock<std::mutex>> lockOpen(Connection& conn);
 
 class SqliteBlobStore final : public domain::BlobStore {

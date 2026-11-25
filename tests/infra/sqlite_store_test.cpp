@@ -1,6 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <fstream>
+#include <thread>
 
 #include "safebox/domain/model/safe_format.hpp"
 #include "safebox/infra/factories.hpp"
@@ -733,5 +737,68 @@ TEST_CASE("an unfinished backup leaves no files; close stops it", "[sqlite][back
     while (!(*fresh)->step().value()) {
     }
     CHECK(std::filesystem::exists(dir / "b.safebox"));
+    store->close();
+}
+
+TEST_CASE("requests are not starved while a backup steps back to back", "[sqlite][backup]") {
+    // BackupService шагает подряд; мьютекс соединения не честный, и шаг, бравший его сразу
+    // снова, держал запросы: на копии 40 ГБ GET /safe/status ждал до 25 с (таймаут клиента).
+    // Здесь копия маленькая и из кэша, старое поведение не воспроизводится надежно - тест
+    // сторожит границу ожидания; сам случай мерян на сервере (было 25 с, стало 2 с).
+    TempDir dir;
+    auto store = infra::makeSqliteVaultStore();
+    REQUIRE(store->create(dir / "v.safebox", sampleMeta()).has_value());
+    // ~64 МиБ: шагов по 16 МиБ - 4-5
+    insertEntry(*store, std::nullopt, false, writeBlob(*store, 64, 1024 * 1024));
+    auto copy = store->backup(dir / "copy.safebox");
+    REQUIRE(copy.has_value());
+
+    std::atomic<int> steps{0};
+    std::atomic<bool> finished{false};
+    std::atomic<bool> failed{false};
+    std::jthread copier([&] {
+        for (;;) {
+            auto done = (*copy)->step();
+            if (!done) {
+                failed = true;
+                break;
+            }
+            ++steps;
+            if (*done) {
+                break;
+            }
+        }
+        finished = true;
+    });
+    while (steps.load() == 0 && !finished.load()) {
+        std::this_thread::yield();
+    }
+    // запросы, пока идет копия: дольше всех ждавший - не дольше нескольких шагов
+    int served = 0;
+    auto worst = std::chrono::steady_clock::duration::zero();
+    while (!finished.load()) {
+        const auto t = std::chrono::steady_clock::now();
+        const bool ok = store->meta().has_value(); // lockOpen - как у любого запроса API
+        CHECK(ok);
+        if (!ok) {
+            break; // REQUIRE тут оставил бы поток копии без join
+        }
+        worst = std::max(worst, std::chrono::steady_clock::now() - t);
+        ++served;
+        // как запросы API: приходят посреди шага и засыпают на мьютексе, а не крутятся на нем
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    copier.join();
+    REQUIRE_FALSE(failed.load());
+    const auto worstMs = std::chrono::duration_cast<std::chrono::milliseconds>(worst).count();
+    INFO("steps " << steps.load() << ", requests " << served << ", worst wait " << worstMs
+                  << " ms");
+    CHECK(steps.load() >= 3);
+    CHECK(served >= 1);
+    // граница с запасом: последний шаг - fsync копии под мьютексом (медленный диск CI,
+    // санитайзеры); поймать нужно секунды-десятки секунд, а не доли
+    CHECK(worstMs < 5000);
+    CHECK(std::filesystem::exists(dir / "copy.safebox"));
+    copy->reset();
     store->close();
 }
