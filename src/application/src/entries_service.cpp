@@ -6,6 +6,7 @@
 #include <unordered_set>
 
 #include "ordering.hpp"
+#include "path_folders.hpp"
 #include "safebox/domain/model/rules.hpp"
 #include "service_impls.hpp"
 #include "vault_session.hpp"
@@ -94,7 +95,7 @@ Result<MovePlan> planMoveOn(const VaultSession& session, const Catalog& cat,
             step.skip = true;
         } else {
             if (policy == ConflictPolicy::KeepBoth && (clash || found != occupant.end())) {
-                step.rename = uniqueName(entry.name, entry.isFolder(), taken);
+                step.rename = uniqueName(entry.name, wholeName(entry), taken);
             }
             const auto folded = foldForSearch(step.rename ? *step.rename : entry.name);
             taken.insert(folded);
@@ -401,6 +402,60 @@ public:
         }
         ctx->session.catalogChanged(changed);
         return result;
+    }
+
+    Result<std::vector<std::optional<EntryId>>>
+    makeFolders(const Lease& lease, std::optional<EntryId> parent,
+                std::span<const std::string> paths) override {
+        if (paths.size() > kMaxFolderPaths) {
+            return fail(Error::Code::InvalidArgument, "Не больше 10 000 путей за раз");
+        }
+        std::vector<std::vector<std::string>> split;
+        split.reserve(paths.size());
+        for (const auto& path : paths) {
+            auto dirs = splitDirectories(path);
+            if (!dirs) {
+                return fail(Error::Code::InvalidArgument, "Недопустимый путь: " + path);
+            }
+            split.push_back(std::move(*dirs));
+        }
+        auto ctx = contextOf(lease);
+        if (!ctx) {
+            return std::unexpected(ctx.error());
+        }
+        auto catalog = catalogOf(*ctx, ports_.store);
+        if (!catalog) {
+            return std::unexpected(catalog.error());
+        }
+        if (auto st = requireLive(**catalog, parent); !st) {
+            return std::unexpected(st.error());
+        }
+        std::vector<std::optional<EntryId>> out;
+        out.reserve(split.size());
+        CatalogChanges changed;
+        {
+            auto uow = ports_.store.begin();
+            if (!uow) {
+                return std::unexpected(uow.error());
+            }
+            PathFolders folders(ports_, ctx->session, ctx->sealer, parent, *catalog);
+            for (const auto& dirs : split) {
+                auto id = folders.resolve(dirs, &**uow);
+                if (!id) {
+                    return std::unexpected(id.error());
+                }
+                out.push_back(*id);
+            }
+            if (folders.created().empty()) {
+                return out; // все папки уже были
+            }
+            if (auto st = (*uow)->commit(); !st) {
+                return std::unexpected(st.error());
+            }
+            changed.entries = folders.created();
+        }
+        ctx->session.catalogChanged(changed);
+        return out;
     }
 
     Result<std::vector<HashMatch>> lookup(const Lease& lease,

@@ -186,6 +186,46 @@ void registerEntriesApi(httplib::Server& server, ApiContext& ctx) {
         sendJson(res, Json{{"folders", std::move(items)}});
     });
 
+    // Папки по путям: {"parentId": число|null, "paths": [строка]} -> {"ids": [число|null]}.
+    server.Post("/api/v1/folders", [&ctx](const httplib::Request& req, httplib::Response& res) {
+        auto lease = requireApi(ctx, req, res);
+        if (!lease) {
+            return;
+        }
+        auto body = readJsonObject(req, res);
+        if (!body) {
+            return;
+        }
+        std::optional<domain::EntryId> parent;
+        if (!readParent(*body, parent, res)) {
+            return;
+        }
+        const auto it = body->find("paths");
+        if (it == body->end() || !it->is_array() || it->empty()) {
+            sendError(res, 400, "bad_request", "Поле 'paths' должно быть непустым списком строк");
+            return;
+        }
+        std::vector<std::string> paths;
+        paths.reserve(it->size());
+        for (const auto& path : *it) {
+            if (!path.is_string()) {
+                sendError(res, 400, "bad_request", "Поле 'paths' должно быть списком строк");
+                return;
+            }
+            paths.push_back(path.get<std::string>());
+        }
+        auto made = ctx.services.entries->makeFolders(*lease, parent, paths);
+        if (!made) {
+            sendError(res, made.error());
+            return;
+        }
+        Json ids = Json::array();
+        for (const auto& id : *made) {
+            ids.push_back(id ? Json(*id) : Json(nullptr));
+        }
+        sendJson(res, Json{{"ids", std::move(ids)}});
+    });
+
     server.Patch("/api/v1/entries/:id",
                  [&ctx](const httplib::Request& req, httplib::Response& res) {
                      auto lease = requireApi(ctx, req, res);

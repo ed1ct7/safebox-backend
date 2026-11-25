@@ -194,6 +194,20 @@ public:
         return conflicts;
     }
 
+    app::Result<std::vector<std::optional<domain::EntryId>>>
+    makeFolders(const app::Lease&, std::optional<domain::EntryId> parent,
+                std::span<const std::string> paths) override {
+        lastFolderParent = parent;
+        lastFolderPaths.assign(paths.begin(), paths.end());
+        std::vector<std::optional<domain::EntryId>> out;
+        for (std::size_t i = 0; i < paths.size(); ++i) {
+            out.push_back(paths[i].empty() ? parent : std::optional<domain::EntryId>(100 + i));
+        }
+        return out;
+    }
+    std::optional<domain::EntryId> lastFolderParent;
+    std::vector<std::string> lastFolderPaths;
+
     app::Result<app::MoveResult> move(const app::Lease&, const app::MoveCmd& cmd) override {
         if (moveError) {
             return std::unexpected(*moveError);

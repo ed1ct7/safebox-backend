@@ -635,3 +635,93 @@ TEST_CASE("a lease can be shared while the session is open", "[session][lease]")
     CHECK(emptyShared->session() == nullptr);
     CHECK(empty.weakSession().expired());
 }
+
+TEST_CASE("makeFolders finds and creates folders by path in one transaction",
+          "[entries][folders]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    REQUIRE(f.importFiles(s, {{"Dest/x.txt", "X"}, {"note", "N"}}).imported == 2);
+    const auto dest = f.entryNamed(s, "Dest");
+
+    const std::vector<std::string> paths{"dest", "Dest/A/B", "", "dest/a", "note", "New"};
+    auto made = f.services.entries->makeFolders(f.lease(s), std::nullopt, paths);
+    REQUIRE(made.has_value());
+    REQUIRE(made->size() == paths.size());
+    CHECK((*made)[0] == dest.id); // без учета регистра - та же папка
+    CHECK_FALSE((*made)[2].has_value());
+    const auto a = f.entryNamed(s, "A", dest.id);
+    CHECK((*made)[3] == a.id);
+    CHECK((*made)[1] == f.entryNamed(s, "B", a.id).id);
+    // одноименный файл не мешает: папка рядом
+    CHECK(sorted(namesIn(f, s, std::nullopt)) == Names{"Dest", "New", "note", "note"});
+
+    // повтор ничего не создает
+    auto again = f.services.entries->makeFolders(f.lease(s), std::nullopt, paths);
+    REQUIRE(again.has_value());
+    CHECK(*again == *made);
+    CHECK(namesIn(f, s, std::nullopt).size() == 4);
+
+    // от папки
+    auto inner =
+        f.services.entries->makeFolders(f.lease(s), dest.id, std::vector<std::string>{"A", "C"});
+    REQUIRE(inner.has_value());
+    CHECK((*inner)[0] == a.id);
+    CHECK(sorted(namesIn(f, s, dest.id)) == Names{"A", "C", "x.txt"});
+
+    // ".." - ошибка, ничего не создано
+    auto bad = f.services.entries->makeFolders(f.lease(s), std::nullopt,
+                                               std::vector<std::string>{"Z", "../y"});
+    REQUIRE_FALSE(bad.has_value());
+    CHECK(bad.error().code == Code::InvalidArgument);
+    CHECK(namesIn(f, s, std::nullopt).size() == 4);
+
+    // папка в корзине: родителем нельзя, по пути - новая рядом
+    REQUIRE(f.services.entries->remove(f.lease(s), std::vector<domain::EntryId>{a.id}).has_value());
+    auto trashed = f.services.entries->makeFolders(f.lease(s), a.id, std::vector<std::string>{"q"});
+    REQUIRE_FALSE(trashed.has_value());
+    CHECK(trashed.error().code == Code::InvalidArgument);
+    auto fresh = f.services.entries->makeFolders(f.lease(s), std::nullopt,
+                                                 std::vector<std::string>{"Dest/A"});
+    REQUIRE(fresh.has_value());
+    CHECK((*fresh)[0] != a.id);
+
+    auto missing = f.services.entries->makeFolders(f.lease(s), 9999, std::vector<std::string>{"q"});
+    REQUIRE_FALSE(missing.has_value());
+    CHECK(missing.error().code == Code::NotFound);
+
+    f.services.safe->lock();
+    auto reopened = f.services.safe->unlock({"test", "secret1"});
+    REQUIRE(reopened.has_value());
+    CHECK(sorted(namesIn(f, *reopened, dest.id)) == Names{"A", "C", "x.txt"});
+}
+
+TEST_CASE("a link moved or restored next to a namesake gets the number at the end",
+          "[entries][move][trash]") {
+    AppFixture f;
+    auto s = f.createSafe();
+    REQUIRE(f.importFiles(s, {{"D/x.txt", "X"}}).imported == 1);
+    const auto dest = f.entryNamed(s, "D");
+    app::NewLink inDest{.url = "https://example.com/a", .path = "D"};
+    app::NewLink atRoot{.url = "https://example.com/b"};
+    app::NewLink atRoot2{.url = "https://example.com/c"};
+    REQUIRE(f.services.links->create(f.lease(s), {std::nullopt, {inDest, atRoot, atRoot2}})
+                .has_value());
+    CHECK(sorted(namesIn(f, s, std::nullopt)) == Names{"D", "example.com", "example.com (2)"});
+    const auto b = f.entryNamed(s, "example.com");
+
+    auto moved = f.services.entries->move(f.lease(s), moveCmd({b.id}, dest.id));
+    REQUIRE(moved.has_value());
+    CHECK(sorted(namesIn(f, s, dest.id)) == Names{"example.com", "example.com (2)", "x.txt"});
+
+    // восстановление рядом с одноименной: c ("example.com (2)") в корзине, в корне появились
+    // новые "example.com" и "example.com (2)"
+    const auto c = f.entryNamed(s, "example.com (2)");
+    REQUIRE(f.services.entries->remove(f.lease(s), std::vector<domain::EntryId>{c.id}).has_value());
+    app::NewLink d{.url = "https://example.com/d"};
+    app::NewLink e{.url = "https://example.com/e"};
+    REQUIRE(f.services.links->create(f.lease(s), {std::nullopt, {d, e}}).has_value());
+    auto restored = f.services.trash->restore(f.lease(s), std::vector<domain::EntryId>{c.id});
+    REQUIRE(restored.has_value());
+    CHECK(sorted(namesIn(f, s, std::nullopt)) ==
+          Names{"D", "example.com", "example.com (2)", "example.com (2) (2)"});
+}

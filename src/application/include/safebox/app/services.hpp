@@ -162,6 +162,7 @@ struct HashMatch {
 };
 
 inline constexpr std::size_t kMaxLookupHashes = 10'000;
+inline constexpr std::size_t kMaxFolderPaths = 10'000;
 
 class EntriesService {
 public:
@@ -189,6 +190,13 @@ public:
     // Перенос одной транзакцией; в себя или своего потомка нельзя (ничего не меняется). Ни
     // переносимые, ни родитель не могут быть в корзине (InvalidArgument).
     [[nodiscard]] virtual Result<MoveResult> move(const Lease& lease, const MoveCmd& cmd) = 0;
+    // Папки по путям внутри parent (nullopt - корень), недостающие создаются; одна транзакция,
+    // ошибка -> ничего не создано. Путь чистится и сливается с папками как у импорта и ссылок;
+    // пустой путь - сам parent, ".." -> InvalidArgument. Не больше kMaxFolderPaths путей.
+    // -> id папки на каждый путь, по порядку (nullopt - корень).
+    [[nodiscard]] virtual Result<std::vector<std::optional<domain::EntryId>>>
+    makeFolders(const Lease& lease, std::optional<domain::EntryId> parent,
+                std::span<const std::string> paths) = 0;
     // В корзину одной транзакцией: trashedAt ставится только корням выделения, потомки уходят с
     // ними. Уже лежащие в корзине пропускаются. -> сколько записей ушло всего (с потомками).
     [[nodiscard]] virtual Result<std::size_t> remove(const Lease& lease,

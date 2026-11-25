@@ -119,7 +119,7 @@ public:
             }
             Step step{id};
             if (names->second.contains(node->folded)) {
-                step.rename = uniqueName(node->entry.name, node->entry.isFolder(), names->second);
+                step.rename = uniqueName(node->entry.name, wholeName(node->entry), names->second);
                 names->second.insert(foldForSearch(*step.rename));
             } else {
                 names->second.insert(node->folded);

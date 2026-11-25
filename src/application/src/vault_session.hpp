@@ -31,10 +31,16 @@ namespace safebox::app {
 // кириллица; "ё" приравнена к "е".
 [[nodiscard]] std::string foldForSearch(std::string_view text);
 
+// Номер в имени ставится в конец, а не перед расширением: папка и ссылка ("example.com").
+[[nodiscard]] inline bool wholeName(const domain::Entry& entry) {
+    return entry.isFolder() || entry.meta.kind == domain::Kind::Link;
+}
+
 // Имя, не занятое среди соседей: "имя (2).ext", "имя (3).ext"... taken - folded-имена соседей
-// (результат туда не добавляется). Для папок расширения нет. resume - для тех, кто подбирает много
-// имен подряд от одной основы при растущем taken: номер, с которого продолжить (меньше 2 - с
-// двойки), после вызова там выбранный номер; без него каждый вызов пробует все номера с двойки.
+// (результат туда не добавляется). isFolder - расширения нет (wholeName): "a.com (2)". resume -
+// для тех, кто подбирает много имен подряд от одной основы при растущем taken: номер, с которого
+// продолжить (меньше 2 - с двойки), после вызова там выбранный номер; без него каждый вызов
+// пробует все номера с двойки.
 [[nodiscard]] std::string uniqueName(std::string_view name, bool isFolder,
                                      const std::unordered_set<std::string>& taken,
                                      int* resume = nullptr);

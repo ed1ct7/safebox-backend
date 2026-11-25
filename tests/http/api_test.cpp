@@ -635,6 +635,27 @@ TEST_CASE("PATCH /entries/:id takes name, description and url", "[http][entries]
     CHECK(tooLong.json()["error"]["message"] == "Описание длиннее 64 КиБ");
 }
 
+TEST_CASE("POST /folders resolves paths to folder ids", "[http][entries][folders]") {
+    HttpFixture f;
+    auto made = f.api("POST", "/api/v1/folders", R"({"parentId":1,"paths":["a/b",""]})");
+    REQUIRE(made.status == 200);
+    CHECK(made.json()["ids"] == http::Json::parse("[100,1]"));
+    CHECK(f.fakes.entries->lastFolderParent == 1);
+    CHECK(f.fakes.entries->lastFolderPaths == std::vector<std::string>{"a/b", ""});
+
+    auto root = f.api("POST", "/api/v1/folders", R"({"parentId":null,"paths":[""]})");
+    REQUIRE(root.status == 200);
+    CHECK(root.json()["ids"] == http::Json::parse("[null]"));
+
+    for (const char* bad :
+         {R"({"paths":["a"]})", R"({"parentId":null})", R"({"parentId":null,"paths":[]})",
+          R"({"parentId":null,"paths":"a"})", R"({"parentId":null,"paths":[1]})",
+          R"({"parentId":0,"paths":["a"]})"}) {
+        INFO(bad);
+        CHECK(f.api("POST", "/api/v1/folders", bad).status == 400);
+    }
+}
+
 TEST_CASE("move/plan lists name conflicts", "[http][entries][move]") {
     HttpFixture f;
     f.fakes.entries->conflicts = {{4, makeEntry(2, 1, domain::Kind::Photo, "море.jpg")}};
